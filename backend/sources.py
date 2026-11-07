@@ -205,6 +205,23 @@ def get_elevations(points):
     return _with_fallback("Open-Meteo elevation", live, lambda: demo.elevation(points))
 
 
+# ---------------------------------------------------------------- vegetation (MODIS NDVI)
+
+def get_vegetation():
+    """{cell_id: spring NDVI} from data/vegetation.json, made once by scripts/fetch_vegetation.py.
+    Missing or incomplete file -> {} and mode "off": the vegetation multiplier is simply not applied."""
+    cells = build_grid()
+    if DATA_MODE == "demo":
+        return {c["id"]: demo.ndvi(c["lat"], c["lon"]) for c in cells}, {"source": "vegetation", "mode": "demo", "note": "PYROWATCH_DATA_MODE=demo"}
+    path = DATA_DIR / "vegetation.json"
+    if path.exists():
+        js = json.loads(path.read_text())
+        vals = js.get("cells", {})
+        if js.get("meta", {}).get("grid_step") == GRID_STEP_DEG and all(c["id"] in vals for c in cells):
+            return vals, {"source": js["meta"].get("source", "MODIS NDVI"), "mode": "live", "composite": js["meta"].get("composite")}
+    return {}, {"source": "vegetation", "mode": "off", "note": "data/vegetation.json missing or incomplete — run scripts/fetch_vegetation.py"}
+
+
 # ---------------------------------------------------------------- fire history
 
 def get_fire_history():

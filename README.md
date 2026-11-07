@@ -49,12 +49,15 @@ shared secret that beacons must send to post readings.
    `python scripts/build_fire_history.py --start 2015 --end 2025`
    If the download is slow, grab the MODIS → United States yearly CSVs from https://firms.modaps.eosdis.nasa.gov/country/
    in a browser and run `--csv file1.csv file2.csv …`.
-2. **Click through every Replay preset** with live data and pick the one that tells the best story.
-3. **Record a real prediction.** The first live map each day is saved to `data/ledger/YYYY-MM-DD.json`,
+2. **Fetch vegetation once** (`python scripts/fetch_vegetation.py`, 5–15 min) and commit
+   `data/vegetation.json`.
+3. **Click through every Replay preset** with live data and pick the one that tells the best story
+   (`python scripts/check_presets.py` does all of them at once).
+4. **Record a real prediction.** The first live map each day is saved to `data/ledger/YYYY-MM-DD.json`,
    and with `DATABASE_URL` set, *every* refresh is stored in Tiger Data. Commit the ledger file to
    git right away: the commit timestamp proves the prediction came before the fires. Two days later,
    "Validate" uses that recorded prediction instead of a hindcast.
-4. Record a backup video of the demo.
+5. Record a backup video of the demo.
 
 ---
 
@@ -63,8 +66,9 @@ shared secret that beacons must send to post readings.
 Each 0.5° grid cell (~50 km, 186 cells over California) gets a **risk index from 0 to 100**:
 
 ```
-points_i = 100 × weight_i × factor_i × fuel_gate        risk = Σ points_i
-fuel_gate = 0.35 + 0.65 × fuel_dryness                   (wet vegetation damps the weather factors)
+points_i = 100 × weight_i × factor_i × fuel_gate × veg_gate        risk = Σ points_i
+fuel_gate = 0.35 + 0.65 × fuel_dryness           (wet vegetation damps the weather factors)
+veg_gate  = 0.2 + 0.8 × vegetation               (spring NDVI: bare desert can't rank high)
 ```
 
 | Factor | Weight | Measured as (0 → 1) | Source |
@@ -75,13 +79,15 @@ fuel_gate = 0.35 + 0.65 × fuel_dryness                   (wet vegetation damps 
 | Fire history | 14% | satellite fire-days in the cell over the previous 5 years (log scale) | NASA FIRMS archive |
 | Heat | 10% | max temperature, 15 → 40 °C | Open-Meteo forecast |
 | Terrain | 8% | elevation variability across the cell (0 → 450 m std. dev.) | Open-Meteo elevation |
+| Vegetation | multiplier | spring NDVI 0.10 → 0.40 (×0.2 → ×1.0): is there anything to burn? | NASA MODIS MOD13Q1, Apr 2016 (before every replay preset) |
 
 The UI breakdown is exactly these points, so judges can see why an area scored 72. It is a
 **relative risk index, not a probability.** The trained model (below) adds an actual probability.
 
-**Fuel dryness is a proxy** built from precipitation and vapour-pressure deficit, not NDVI from raw
-imagery, which would take the whole hackathon to process. Upgrade path:
-the ORNL DAAC MODIS web service returns MOD13Q1 NDVI per point with no key needed.
+**Fuel dryness is a proxy** built from precipitation and vapour-pressure deficit. **Vegetation**
+comes from MODIS NDVI (via the ORNL DAAC web service, no key), fetched once with
+`python scripts/fetch_vegetation.py` into `data/vegetation.json`, which is committed so teammates
+get it with `git pull`. Without that file the multiplier is simply off (badge "Vegetation: off").
 
 ### Validation (`/api/validate`)
 

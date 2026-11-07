@@ -182,11 +182,11 @@ function renderHeader() {
     : `Forecast window <b>${esc(fmtDate(a))} → ${esc(fmtDate(b))}</b> · updated ${esc(fmtTime(new Date(r.generated_at)))}`;
   const src = [
     ['Weather', r.sources.weather], ['Fires', state.fires?.source], ['Terrain', r.sources.terrain],
-    ['History', r.sources.history], ['Orbits', state.satSource],
+    ['History', r.sources.history], ['Vegetation', r.sources.vegetation], ['Orbits', state.satSource],
   ].filter(([, s]) => s);
-  const anyDemo = src.some(([, s]) => s.mode !== 'live');
+  const anyDemo = src.some(([, s]) => s.mode === 'demo');
   $('#badges').innerHTML = (anyDemo ? '<span class="badge demo-all" title="Some layers use synthetic data — see each badge">DEMO DATA</span>' : '')
-    + src.map(([k, s]) => `<span class="badge ${s.mode !== 'live' ? 'demo' : ''}" title="${esc(s.source)}${s.note ? ` — ${esc(s.note)}` : ''}"><i></i>${k}: ${s.mode === 'live' ? 'live' : 'demo'}</span>`).join('');
+    + src.map(([k, s]) => `<span class="badge ${s.mode !== 'live' ? 'demo' : ''}" title="${esc(s.source)}${s.note ? ` — ${esc(s.note)}` : ''}"><i></i>${k}: ${s.mode === 'live' ? 'live' : s.mode === 'off' ? 'off' : 'demo'}</span>`).join('');
 }
 function renderStats() {
   const r = state.risk, f = state.fires;
@@ -250,7 +250,7 @@ function selectCell(id, { fly = true, focus = false } = {}) {
       </li>`).join('')}
     </ul>
     ${stationBlock(c)}
-    <p class="gate muted">Points = 100 × weight × factor score × fuel gate (×${c.fuel_gate.toFixed(2)}). Wet vegetation shrinks the gate, so wind over green hills doesn't read as fire weather.</p>
+    <p class="gate muted">Points = 100 × weight × factor score × fuel gate (×${c.fuel_gate.toFixed(2)})${c.veg_gate != null && c.vegetation ? ` × vegetation (×${c.veg_gate.toFixed(2)})` : ''}. Wet fuels shrink the fuel gate, so wind over green hills doesn't read as fire weather${c.vegetation ? `; the vegetation multiplier keeps bare desert from ranking high. ${esc(c.vegetation.charAt(0).toUpperCase() + c.vegetation.slice(1))}.` : '.'}</p>
 
     <h3>AI briefing <span class="engine" id="engine">…</span></h3>
     <div id="briefing" class="briefing loading">Analyzing conditions…</div>

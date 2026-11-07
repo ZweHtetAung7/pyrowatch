@@ -38,6 +38,8 @@ def _cell_context(cell, risk_payload, fires_in_cell=None):
         "rank": f"{cell['rank']} of {len(risk_payload['cells'])} areas statewide",
         "factors": [{"factor": f["label"], "points": f["points"], "score_0_1": f["value"], "measured": f["explain"]} for f in cell["factors"]],
         "fuel_gate_multiplier": cell["fuel_gate"],
+        "vegetation_multiplier": cell.get("veg_gate"),
+        "vegetation": cell.get("vegetation"),
         "ml_7day_ignition_probability": cell.get("ml_prob"),
         "active_fire_detections_in_area_last_48h": fires_in_cell,
         "neighbors": neighbors,

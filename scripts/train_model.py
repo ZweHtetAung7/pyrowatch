@@ -83,6 +83,9 @@ else:
     fire_days = {k: set(v) for k, v in json.loads(fd_path.read_text())["days"].items()}
 
 hist, _ = sources.get_fire_history()
+veg, veg_status = sources.get_vegetation()
+if veg_status["mode"] == "off":
+    print("note: no data/vegetation.json; training without the vegetation feature (run scripts/fetch_vegetation.py)")
 elev, _ = sources.get_elevations([p for c in cells for p in c["terrain_points"]])
 relief, i = {}, 0
 for c in cells:
@@ -108,7 +111,7 @@ for yr in args.years:
         feats = {}
         for c, series in zip(cells, wx):
             fd = sum(hist.get(c["id"], {}).get(h, 0) for h in hist_years)
-            feats[c["id"]] = risk.raw_features(series, d, relief[c["id"]], fd)
+            feats[c["id"]] = risk.raw_features(series, d, relief[c["id"]], fd, veg.get(c["id"]))
         scores = {c["id"]: risk.score_cell(feats[c["id"]], c["lat"])[0] for c in cells}
         demo_fires = None
         if args.demo:  # synthetic ignitions, more likely where the index is high (pipeline test only)

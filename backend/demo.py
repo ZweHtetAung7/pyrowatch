@@ -86,6 +86,14 @@ def elevation(points):
     return out
 
 
+def ndvi(lat, lon):
+    """Synthetic spring NDVI: low in the southeastern deserts, higher north and on the coast."""
+    desert = min(1.0, _gauss2(lat, lon, 34.6, -116.0, 1.3) + 0.7 * _gauss2(lat, lon, 36.3, -116.8, 0.8)
+                 + 0.6 * _gauss2(lat, lon, 33.0, -115.5, 0.6))
+    v = 0.42 + 0.2 * max(0.0, (lat - 37.5) / 4.5) + 0.1 * _coastal(lat, lon) - 0.38 * desert
+    return round(max(0.05, min(0.85, v + _rng("ndvi", round(lat, 2), round(lon, 2)).gauss(0, 0.04))), 3)
+
+
 def fire_history(cells, years):
     """{cell_id: {year: fire_days}} with more fire in SoCal, foothills and NorCal."""
     hist = {}

@@ -101,6 +101,8 @@ class Tools:
             out["factors"] = [{"factor": f["label"], "points": f["points"], "measured": f["explain"]}
                               for f in sorted(c["factors"], key=lambda f: -f["points"])]
             out["fuel_gate"] = c["fuel_gate"]
+            out["vegetation_multiplier"] = c.get("veg_gate")
+            out["vegetation"] = c.get("vegetation")
             if c.get("ml_prob") is not None:
                 out["ml_7day_new_fire_probability"] = c["ml_prob"]
             out["fire_detections_in_area"] = sum(1 for d in self.fires["detections"] if d.get("cell_id") == c["id"])

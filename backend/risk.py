@@ -2,11 +2,13 @@
 
 Transparent weighted index (0-100) per grid cell:
 
-    points_i = 100 * weight_i * factor_i * fuel_gate        total = sum(points_i)
+    points_i = 100 * weight_i * factor_i * fuel_gate * veg_gate        total = sum(points_i)
 
-Each factor_i is a 0-1 score from a real measurement (see FACTORS / score_factors), and
+Each factor_i is a 0-1 score from a real measurement (see FACTORS / score_factors).
 fuel_gate = 0.35 + 0.65 * fuel_dryness, so wet vegetation damps the weather factors: a windy
-day over green hills is not a fire day. The breakdown shown in the UI is exactly these points.
+day over green hills is not a fire day. veg_gate = 0.2 + 0.8 * vegetation, from spring NDVI, so
+an area with almost nothing to burn (desert) can't rank high however hot and dry it is.
+The breakdown shown in the UI is exactly these points.
 
 It is a *risk index*, not a calibrated probability. If scripts/train_model.py has been run,
 each cell also gets `ml_prob`: a trained classifier's probability of a new ignition within 7 days.
@@ -40,7 +42,7 @@ SIGNIFICANT_MIN_FRP_MW = 50.0
 RAIN_DAY_MM = 2.0
 ML_FEATURES = [
     "tmax_c", "rh_min_pct", "gust_kmh", "wind_kmh", "days_since_rain", "precip_30d_mm",
-    "vpd_kpa", "relief_m", "fire_days_5y", "month_sin", "month_cos",
+    "vpd_kpa", "relief_m", "fire_days_5y", "ndvi", "month_sin", "month_cos",
 ]
 
 
@@ -57,7 +59,7 @@ def _agg(rows, var, fn):
     return fn(vals) if vals else None
 
 
-def raw_features(series, as_of: date, relief_m, fire_days_5y):
+def raw_features(series, as_of: date, relief_m, fire_days_5y, ndvi=None):
     """Measurements for one cell. `series` is {iso_date: {var: value}} from sources.get_weather.
     The "next 48 h" window is days as_of and as_of+1; antecedent dryness uses the 30 days before."""
     window = [series.get((as_of + timedelta(days=k)).isoformat()) for k in (0, 1)]
@@ -88,6 +90,7 @@ def raw_features(series, as_of: date, relief_m, fire_days_5y):
         "et0_mm": _agg(past[:7], "et0_fao_evapotranspiration", statistics.fmean),
         "relief_m": relief_m,
         "fire_days_5y": fire_days_5y,
+        "ndvi": ndvi,
         "month_sin": math.sin(2 * math.pi * as_of.month / 12),
         "month_cos": math.cos(2 * math.pi * as_of.month / 12),
     }
@@ -129,19 +132,35 @@ def score_factors(f, lat):
     }
 
 
+def vegetation_gate(ndvi):
+    """Multiplier from spring NDVI: ~0.2 for bare desert, 1.0 from NDVI 0.4 (shrub, grass, forest) up."""
+    if ndvi is None:
+        return 1.0
+    return 0.2 + 0.8 * clamp01((ndvi - 0.10) / 0.30)
+
+
+def vegetation_text(ndvi):
+    if ndvi is None:
+        return None
+    kind = ("sparse desert vegetation, little to burn" if ndvi < 0.15 else "thin vegetation" if ndvi < 0.25
+            else "shrub and grass cover" if ndvi < 0.45 else "dense vegetation")
+    return f"spring greenness (NDVI) {ndvi:.2f}: {kind}"
+
+
 def score_cell(f, lat):
     scored = score_factors(f, lat)
     avail = [fx for fx in FACTORS if scored[fx["key"]][0] is not None]
     wsum = sum(fx["weight"] for fx in avail) or 1.0
     fuel = scored["fuel"][0]
     gate = 0.35 + 0.65 * (fuel if fuel is not None else 0.5)
+    veg = vegetation_gate(f.get("ndvi"))
     factors = []
     for fx in FACTORS:
         value, explain = scored[fx["key"]]
-        pts = 100 * fx["weight"] / wsum * value * gate if value is not None else 0.0
+        pts = 100 * fx["weight"] / wsum * value * gate * veg if value is not None else 0.0
         factors.append({**fx, "value": None if value is None else round(value, 3), "points": round(pts, 1), "explain": explain})
     total = round(sum(x["points"] for x in factors), 1)
-    return total, round(gate, 3), factors
+    return total, round(gate, 3), factors, round(veg, 3)
 
 
 # ---------------------------------------------------------------- optional trained model
@@ -185,12 +204,14 @@ def _cell_inputs(as_of: date):
         relief[c["id"]] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
 
     hist, hist_status = sources.get_fire_history()
+    veg, veg_status = sources.get_vegetation()
     years = [str(y) for y in range(as_of.year - HISTORY_YEARS, as_of.year)]  # strictly before as_of: no leakage
     feats = {}
     for c, series in zip(cells, wx):
         fd = sum(hist.get(c["id"], {}).get(y, 0) for y in years)  # no detections on record = 0 fire-days
-        feats[c["id"]] = raw_features(series, as_of, relief[c["id"]], fd)
-    return cells, feats, {"weather": wx_status, "terrain": elev_status, "history": {**hist_status, "years_used": f"{years[0]}–{years[-1]}"}}
+        feats[c["id"]] = raw_features(series, as_of, relief[c["id"]], fd, veg.get(c["id"]))
+    return cells, feats, {"weather": wx_status, "terrain": elev_status,
+                          "history": {**hist_status, "years_used": f"{years[0]}–{years[-1]}"}, "vegetation": veg_status}
 
 
 def compute_risk(as_of: date | None = None):
@@ -208,10 +229,11 @@ def _compute_risk(d: date, today: date):
     out = []
     for c in cells:
         f = feats[c["id"]]
-        total, gate, factors = score_cell(f, c["lat"])
+        total, gate, factors, veg_gate = score_cell(f, c["lat"])
         row = {
             "id": c["id"], "name": c["name"], "lat": c["lat"], "lon": c["lon"], "shape": c["shape"],
-            "risk": total, "category": category(round(total)), "fuel_gate": gate, "factors": factors,
+            "risk": total, "category": category(round(total)), "fuel_gate": gate, "veg_gate": veg_gate,
+            "vegetation": vegetation_text(f.get("ndvi")), "factors": factors,
             "raw": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in f.items() if not k.startswith("month_")},
         }
         if bundle:
