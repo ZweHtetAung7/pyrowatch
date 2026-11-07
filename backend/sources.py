@@ -263,6 +263,8 @@ def _parse_firms_csv(text, product, sat_name):
             continue
         if not in_california(lat, lon):
             continue
+        if (row.get("type") or "0").strip() in ("1", "2", "3"):
+            continue  # FIRMS archive label: 1 volcano, 2 static land source (refinery, flare), 3 offshore
         hhmm = (row.get("acq_time") or "0").zfill(4)
         t = datetime.strptime(f"{row['acq_date']} {hhmm}", "%Y-%m-%d %H%M").replace(tzinfo=timezone.utc)
         name = sat_name or {"T": "Terra", "A": "Aqua"}.get((row.get("satellite") or "?")[:1].upper(), row.get("satellite"))

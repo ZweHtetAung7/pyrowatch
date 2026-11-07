@@ -416,7 +416,7 @@ function renderValidation(v) {
          </div>
          <p class="muted small">Random guessing would put ${topPct}% of fires in the top ${topPct}% (1.0×). AUC 0.5 = random, 1.0 = perfect ranking.</p>`}
     ${a.new_fire_cells ? `<p class="small">Counting every satellite hotspot, including small farm and prescribed burns: ${a.hits} of ${a.new_fire_cells} (${pc(a.hit_rate)}), ${a.lift}× vs random, AUC ${a.auc ?? '–'}.</p>` : ''}
-    <p class="small"><b>Method:</b> ${esc(v.method)}. "New" = no detections in that area in the 5 days before. "Significant" = ${esc(v.significant_rule)}.</p>
+    <p class="small"><b>Method:</b> ${esc(v.method)}. "Significant" = ${esc(v.significant_rule)}; ${esc(v.new_rule || '')}.</p>
     ${sig.length ? `<h3>Significant new fires, ranked by our earlier risk score</h3>
     <ul class="v-list">${sig.map((c) => `
       <li data-id="${esc(c.id)}">

@@ -340,7 +340,16 @@ def validate(as_of: date | None = None, top_fraction=0.2):
     window_days = min(3, (today - d).days + 1)
     window, w_status = sources.get_fires(d, window_days, demo_risk=scores)
     prior, p_status = sources.get_fires(d - timedelta(days=5), 5, demo_risk=scores)
-    prior_cells = {cell_for_point(x["lat"], x["lon"]) for x in prior} - {None}
+    prior_stats = {}
+    for det in prior:
+        cid = cell_for_point(det["lat"], det["lon"])
+        if cid is not None:
+            st = prior_stats.setdefault(cid, {"n": 0, "max_frp": 0.0})
+            st["n"] += 1
+            st["max_frp"] = max(st["max_frp"], det["frp"])
+    is_big = lambda st: st["n"] >= SIGNIFICANT_MIN_DETECTIONS or st["max_frp"] >= SIGNIFICANT_MIN_FRP_MW  # noqa: E731
+    prior_cells = set(prior_stats)  # any detection before: excluded from the all-hotspot count
+    prior_big = {cid for cid, st in prior_stats.items() if is_big(st)}  # a real fire before: excluded from significant
 
     by_cell = {}
     for det in window:
@@ -353,8 +362,9 @@ def validate(as_of: date | None = None, top_fraction=0.2):
         if det["time_utc"] < e["first"]:
             e["first"], e["satellite"] = det["time_utc"], det["satellite"]
     new_cells = {cid: v for cid, v in by_cell.items() if cid not in prior_cells}
-    significant = {cid: v for cid, v in new_cells.items()
-                   if v["n"] >= SIGNIFICANT_MIN_DETECTIONS or v["max_frp"] >= SIGNIFICANT_MIN_FRP_MW}
+    # A 50 km area often holds a small hotspot or two (a flare, a farm burn) every few days; that
+    # shouldn't disqualify a major fire there. Significant = a big fire now, and none in the 5 days before.
+    significant = {cid: v for cid, v in by_cell.items() if is_big(v) and cid not in prior_big}
 
     ranked = sorted(scores, key=lambda cid: -scores[cid])
     rank = {cid: i + 1 for i, cid in enumerate(ranked)}
@@ -385,14 +395,17 @@ def validate(as_of: date | None = None, top_fraction=0.2):
         "significant_rule": f"at least {SIGNIFICANT_MIN_DETECTIONS} satellite detections in the area, or a peak above {SIGNIFICANT_MIN_FRP_MW:.0f} MW",
         **metrics(significant),
         "all_hotspots": metrics(new_cells),
-        "already_burning_cells": len(set(by_cell) & prior_cells),
+        "already_burning_cells": len(set(by_cell) & prior_big),
+        "new_rule": ("a significant fire counts as new if that area had no significant fire in the 5 days before; "
+                     "for all hotspots, no detection at all in the 5 days before"),
+        "excluded_already_burning": [names[cid]["name"] for cid in by_cell if cid in prior_big and is_big(by_cell[cid]) and cid in names],
         "cells": sorted(
             [
                 {"id": cid, "name": names[cid]["name"], "lat": names[cid]["lat"], "lon": names[cid]["lon"],
                  "risk": scores[cid], "rank": rank[cid], "in_top": cid in top, "detections": v["n"],
                  "significant": cid in significant,
                  "first_detection_utc": v["first"], "first_satellite": v["satellite"], "max_frp": round(v["max_frp"], 1)}
-                for cid, v in new_cells.items() if cid in names
+                for cid, v in {**new_cells, **significant}.items() if cid in names
             ],
             key=lambda x: (not x["significant"], x["rank"]),
         ),

@@ -57,7 +57,9 @@ def check(d: date, label: str):
         "origins": origins,
         "top5": [{"area": c["name"], "risk": c["risk"], "category": c["category"]}
                  for c in sorted(pred["cells"], key=lambda c: -c["risk"])[:5]],
-        "new_fire_list": [{"area": c["name"], "rank": c["rank"], "risk": c["risk"]} for c in v["cells"]],
+        "new_fire_list": [{"area": c["name"], "rank": c["rank"], "risk": c["risk"], "detections": c["detections"],
+                           "max_frp": c["max_frp"]} for c in v["cells"] if c["significant"]],
+        "excluded_already_burning": v["excluded_already_burning"],
     }
 
 
@@ -99,6 +101,13 @@ def main():
     table = "\n".join(lines)
 
     print("\n" + table + "\n")
+    for r in results:
+        if r.get("new_fire_list") is not None:
+            fires = ", ".join(f"{f['area']} #{f['rank']} ({f['detections']} det, {f['max_frp']:.0f} MW)" for f in r["new_fire_list"][:10])
+            print(f"Significant new fires after {r['date']}: {fires or 'none'}")
+            if r.get("excluded_already_burning"):
+                print(f"  excluded (already burning before {r['date']}): {', '.join(r['excluded_already_burning'])}")
+    print()
     for r in results:
         if r.get("top5"):
             print(f"Top 5 on {r['date']}: " + "; ".join(f"{t['area']} {t['risk']:.0f}" for t in r["top5"]))
