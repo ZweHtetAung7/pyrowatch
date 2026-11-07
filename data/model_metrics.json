@@ -1,0 +1,46 @@
+{
+  "results": {
+    "weighted_index (baseline)": {
+      "roc_auc": 0.6087489274989275,
+      "pr_auc": 0.09867120963213918
+    },
+    "logistic_regression": {
+      "roc_auc": 0.7012481231231231,
+      "pr_auc": 0.1397800734337253
+    },
+    "gradient_boosting": {
+      "roc_auc": 0.6687660875160875,
+      "pr_auc": 0.11499959803922344
+    }
+  },
+  "chosen": {
+    "model": "logistic_regression",
+    "test_year": 2023,
+    "train_years": [
+      2021,
+      2022
+    ],
+    "label": "new fire detection in the cell within 7 days",
+    "positives": 611,
+    "samples": 10044,
+    "roc_auc": 0.701,
+    "pr_auc": 0.14,
+    "baseline_roc_auc": 0.609,
+    "base_rate": 0.0717,
+    "data": "FIRMS + ERA5"
+  },
+  "lr_coefficients": {
+    "tmax_c": 0.08058259810619398,
+    "rh_min_pct": -0.17327601274256152,
+    "gust_kmh": -0.01413924259389824,
+    "wind_kmh": 0.1295718005481292,
+    "days_since_rain": 0.06071604271722287,
+    "precip_30d_mm": 0.1595781865025062,
+    "vpd_kpa": -0.02669958365092004,
+    "relief_m": 0.028719292026271003,
+    "fire_days_5y": 0.5054253303316355,
+    "ndvi": 0.44832480863855223,
+    "month_sin": 0.29055922353221325,
+    "month_cos": 0.31641775581958753
+  }
+}
