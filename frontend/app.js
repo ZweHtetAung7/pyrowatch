@@ -116,6 +116,10 @@ async function loadData() {
     else closePanel();
   } catch (e) {
     toast(`Could not load data: ${e.message}`);
+    if (!state.risk) {
+      renderHeader();
+      renderStats(`Could not load data. ${e.message}`);
+    }
   } finally {
     done();
   }
@@ -176,6 +180,7 @@ function renderFires(animate = false) {
 // ------------------------------------------------------------------ rendering: header + stats
 function renderHeader() {
   const r = state.risk;
+  if (!r) { $('#window-line').textContent = ''; $('#badges').innerHTML = ''; return; }
   const [a, b] = [r.as_of, new Date(Date.parse(`${r.as_of}T12:00:00`) + 864e5).toISOString().slice(0, 10)];
   $('#window-line').innerHTML = state.asOf
     ? `Replay · risk as it stood on <b>${esc(fmtLong(a))}</b>, using only data available that day`
@@ -188,16 +193,21 @@ function renderHeader() {
   $('#badges').innerHTML = (anyDemo ? '<span class="badge demo-all" title="Some layers use synthetic data — see each badge">DEMO DATA</span>' : '')
     + src.map(([k, s]) => `<span class="badge ${s.mode !== 'live' ? 'demo' : ''}" title="${esc(s.source)}${s.note ? ` — ${esc(s.note)}` : ''}"><i></i>${k}: ${s.mode === 'live' ? 'live' : s.mode === 'off' ? 'off' : 'demo'}</span>`).join('');
 }
-function renderStats() {
+function renderStats(message) {
+  if (message) {
+    $('#stats').innerHTML = `<div class="stat" style="border-right:0;min-width:0"><div class="k">Status</div><div class="v name" style="max-width:none;white-space:normal">${esc(message)}</div></div>`;
+    return;
+  }
   const r = state.risk, f = state.fires;
+  if (!r) { renderStats('Waiting for data…'); return; }
   const hot = (r.counts.Extreme || 0) + (r.counts['Very high'] || 0);
-  const top = r.top[0];
+  const top = r.top && r.top[0];
   const firesLabel = state.asOf ? 'Fires, next 72 h' : 'Fire detections, 48 h';
   const firesVal = state.asOf && !state.firesRevealed ? '<small>hidden</small>' : `${f?.count ?? '–'}`;
   $('#stats').innerHTML = `
     <div class="stat"><div class="k">${firesLabel}</div><div class="v">${firesVal}</div></div>
     <div class="stat"><div class="k">Areas very high+</div><div class="v">${hot}<small> / ${r.cells.length}</small></div></div>
-    <div class="stat"><div class="k">Highest risk</div><div class="v name" title="${esc(top.name)}">${esc(top.name)} · ${top.risk.toFixed(0)}</div></div>
+    <div class="stat"><div class="k">Highest risk</div><div class="v name" title="${esc(top ? top.name : '')}">${top ? `${esc(top.name)} · ${top.risk.toFixed(0)}` : '–'}</div></div>
     ${state.asOf && !state.firesRevealed ? '<button class="btn-reveal" id="reveal">Reveal what happened next ▸</button>' : ''}`;
   $('#reveal')?.addEventListener('click', reveal);
 }
@@ -674,7 +684,11 @@ function stationBlock(c) {
   try {
     state.config = await api('/api/config');
   } catch (e) {
-    done(); toast(`Backend not reachable: ${e.message}`); return;
+    done();
+    renderStats(`Backend not reachable. Start the server, then refresh. (${e.message})`);
+    toast(`Backend not reachable: ${e.message}`);
+    announce('Backend not reachable. Start the server, then refresh.');
+    return;
   }
   initControls();
   initSatellites();

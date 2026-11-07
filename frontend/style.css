@@ -205,12 +205,19 @@ kbd { font: 10.5px var(--mono); border: 1px solid var(--line); border-bottom-wid
   #panel:not([hidden]) ~ #stats { display: none; }
 }
 @media (max-width: 760px) {
-  #topbar { left: 10px; right: 10px; top: 10px; width: auto; padding: 10px 12px; gap: 8px; }
+  html, body { overflow: hidden; }
+  #topbar { left: 10px; right: 10px; top: 10px; width: auto; padding: 10px 12px; gap: 8px; max-height: 42vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   .brand p { display: none; }
-  #legend { left: 10px; right: 10px; bottom: 10px; width: auto; padding: 10px 12px; }
+  .brand h1 { font-size: 17px; }
+  .tab, .btn-ghost, .btn-primary, .toggle, .btn-reveal { min-height: 44px; }
+  select, input[type="date"], input[type="text"] { min-height: 44px; font-size: 16px; }
+  #legend { left: 10px; right: 10px; bottom: 10px; width: auto; padding: 10px 12px; max-height: 34vh; overflow-y: auto; }
   #legend .scale-wrap, #legend .keys { display: none; }
-  #stats { left: 10px; right: 10px; bottom: 120px; overflow-x: auto; }
+  #stats { left: 10px; right: 10px; bottom: 10px; top: auto; overflow-x: auto; z-index: 900; }
+  /* place stats above the compact legend: legend sits at bottom, give it room */
+  #stats { bottom: calc(10px + env(safe-area-inset-bottom, 0px) + 9.5rem); }
   .stat { min-width: 105px; padding: 8px 12px; }
   #ticker { display: none; }
-  #panel { left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 68vh; border-radius: 18px 18px 0 0; z-index: 1500; }
+  #panel { left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 72vh; border-radius: 18px 18px 0 0; z-index: 1500; padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
+  #toast { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 }
