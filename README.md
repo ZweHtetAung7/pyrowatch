@@ -95,6 +95,9 @@ Be upfront about these caveats. They're printed in the UI too:
 - 50 km cells test regional risk, not exact ignition points.
 - Hindcasts use observed weather in place of the forecast; recorded predictions don't.
 
+To validate every replay preset at once (with the rank of the area where each named fire started),
+run `python scripts/check_presets.py`. It prints a paste-ready table and saves it to `data/preset_results.md`.
+
 ### ML upgrade (stretch goal)
 
 ```bash
