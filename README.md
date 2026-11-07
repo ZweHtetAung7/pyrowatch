@@ -53,7 +53,8 @@ shared secret that beacons must send to post readings.
    `data/vegetation.json`.
 3. **Click through every Replay preset** with live data and pick the one that tells the best story
    (`python scripts/check_presets.py` does all of them at once).
-4. **Record a real prediction.** The first live map each day is saved to `data/ledger/YYYY-MM-DD.json`,
+4. **Record a real prediction.** On one machine only, set `PYROWATCH_RECORD_LEDGER=1` in `.env`; the
+   first live map each day is then saved to `data/ledger/YYYY-MM-DD.json`,
    and with `DATABASE_URL` set, *every* refresh is stored in Tiger Data. Commit the ledger file to
    git right away: the commit timestamp proves the prediction came before the fires. Two days later,
    "Validate" uses that recorded prediction instead of a hindcast.

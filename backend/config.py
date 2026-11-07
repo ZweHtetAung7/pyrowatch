@@ -24,6 +24,10 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb").strip()
 # Tiger Data (TimescaleDB) or any PostgreSQL: time series of predictions and fire detections.
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+# Save each day's first live prediction to data/ledger/. Turn this on for ONE machine only (the model
+# owner's, or the deployed server); if every teammate records, their copies overwrite each other in git.
+RECORD_LEDGER = os.getenv("PYROWATCH_RECORD_LEDGER", "").strip().lower() in ("1", "true", "yes")
+
 # Optional shared secret that PyroWatch Beacons send as X-Station-Token when posting readings.
 STATION_TOKEN = os.getenv("STATION_TOKEN", "").strip()
 

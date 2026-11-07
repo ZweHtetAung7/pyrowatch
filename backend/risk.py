@@ -20,7 +20,7 @@ import statistics
 from datetime import date, datetime, timedelta, timezone
 
 from . import sources, store
-from .config import DATA_DIR, LEDGER_DIR
+from .config import DATA_DIR, LEDGER_DIR, RECORD_LEDGER
 from .geo import build_grid, cell_for_point
 
 log = logging.getLogger("pyrowatch.risk")
@@ -261,7 +261,8 @@ def _compute_risk(d: date, today: date):
         "cells": out,
     }
     if d == today and statuses["weather"]["mode"] == "live":
-        _record_prediction(result)
+        if RECORD_LEDGER:
+            _record_prediction(result)
         store.in_background(store.record_prediction, result)  # every refresh -> a time series in Tiger Data
     return result
 
