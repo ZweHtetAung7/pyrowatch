@@ -5,30 +5,46 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // ------------------------------------------------------------------ colors
-const STOPS = [[0, [26, 152, 80]], [20, [166, 217, 106]], [30, [254, 224, 139]], [45, [253, 174, 97]], [60, [244, 109, 67]], [75, [215, 48, 39]], [100, [142, 1, 82]]];
-function riskColor(v) {
+// Default palette rises steadily in lightness (dark indigo -> gold), so the order reads correctly
+// with any type of color blindness and in grayscale. "Classic" is the familiar green -> red.
+const PALETTES = {
+  safe: { label: 'Colorblind-safe', stops: [[0, [45, 27, 78]], [20, [94, 44, 140]], [40, [168, 50, 121]], [60, [224, 83, 59]], [75, [249, 142, 9]], [100, [252, 222, 95]]] },
+  classic: { label: 'Classic', stops: [[0, [26, 152, 80]], [20, [166, 217, 106]], [30, [254, 224, 139]], [45, [253, 174, 97]], [60, [244, 109, 67]], [75, [215, 48, 39]], [100, [142, 1, 82]]] },
+};
+let palette = 'safe';
+try { palette = PALETTES[localStorage.getItem('pw-palette')] ? localStorage.getItem('pw-palette') : 'safe'; } catch (_) { /* storage blocked */ }
+function rgbAt(v) {
+  const stops = PALETTES[palette].stops;
   v = Math.max(0, Math.min(100, v));
-  for (let i = 1; i < STOPS.length; i++) {
-    const [b, cb] = STOPS[i];
+  for (let i = 1; i < stops.length; i++) {
+    const [b, cb] = stops[i];
     if (v <= b) {
-      const [a, ca] = STOPS[i - 1];
+      const [a, ca] = stops[i - 1];
       const t = (v - a) / (b - a);
-      const c = ca.map((x, k) => Math.round(x + t * (cb[k] - x)));
-      return `rgb(${c[0]},${c[1]},${c[2]})`;
+      return ca.map((x, k) => Math.round(x + t * (cb[k] - x)));
     }
   }
-  return 'rgb(142,1,82)';
+  return stops[stops.length - 1][1];
 }
-const CAT_COLORS = { Low: '#2fbf71', Moderate: '#e0c341', High: '#f39a45', 'Very high': '#ef4b36', Extreme: '#d0247a' };
+const riskColor = (v) => `rgb(${rgbAt(v).join(',')})`;
+const CAT_MID = { Low: 10, Moderate: 30, High: 50, 'Very high': 67, Extreme: 88 };
+const catColor = (cat) => riskColor(CAT_MID[cat] ?? 50);
+function catTextColor(cat) {
+  const [r, g, b] = rgbAt(CAT_MID[cat] ?? 50).map((x) => { x /= 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.18 ? '#0b0f14' : '#ffffff';
+}
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // ------------------------------------------------------------------ state
 const state = {
   config: null, asOf: null, risk: null, fires: null, selected: null, validation: null,
-  sats: [], satSource: null, firesRevealed: true, show: { risk: true, fires: true, sats: true },
+  sats: [], satSource: null, firesRevealed: true, stations: [],
+  show: { risk: true, fires: true, sats: true, stations: true },
 };
 
 // ------------------------------------------------------------------ map
-const map = L.map('map', { zoomControl: false, minZoom: 3, worldCopyJump: true }).setView([37.25, -119.3], 6);
+// Leaflet's own arrow-key panning is off: arrow keys move between areas instead (see initKeyboard).
+const map = L.map('map', { zoomControl: false, minZoom: 3, worldCopyJump: true, keyboard: false }).setView([37.25, -119.3], 6);
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 for (const [name, z] of [['labels', 610], ['validation', 615], ['fires', 620], ['sats', 630]]) {
   map.createPane(name).style.zIndex = z;
@@ -43,7 +59,9 @@ const layers = {
   fires: L.layerGroup().addTo(map),
   sats: L.layerGroup().addTo(map),
   validation: L.layerGroup().addTo(map),
+  stations: L.layerGroup().addTo(map),
 };
+const go = (latlng, zoom) => (reduceMotion ? map.setView(latlng, zoom) : map.flyTo(latlng, zoom, { duration: 0.8 }));
 const polys = {};
 
 // ------------------------------------------------------------------ helpers
@@ -93,7 +111,7 @@ async function loadData() {
     state.risk = risk; state.fires = fires; state.validation = null;
     state.firesRevealed = !state.asOf; // in replay, fires stay hidden until "Reveal what happened"
     layers.validation.clearLayers();
-    renderRisk(); renderFires(); renderHeader(); renderStats();
+    renderRisk(); renderFires(); renderHeader(); renderStats(); buildAreaList();
     if (state.selected && cellById(state.selected)) selectCell(state.selected, { fly: false });
     else closePanel();
   } catch (e) {
@@ -141,8 +159,8 @@ function fireMarker(d, latest) {
   const ageH = (latest - Date.parse(d.time_utc)) / 3.6e6;
   const recent = ageH < 12;
   return L.circleMarker([d.lat, d.lon], {
-    pane: 'fires', radius: 2.5 + Math.min(6, Math.log1p(d.frp)), weight: 1, color: '#ffd27a', opacity: 0.9,
-    fillColor: recent ? '#ff3b1f' : '#ff8a1f', fillOpacity: 0.9, className: recent ? 'fire-dot recent' : 'fire-dot',
+    pane: 'fires', radius: 2.5 + Math.min(6, Math.log1p(d.frp)), weight: 1.3, color: '#ffffff', opacity: 0.95,
+    fillColor: recent ? '#ff1f1f' : '#ff6a1f', fillOpacity: 0.95, className: recent ? 'fire-dot recent' : 'fire-dot',
   }).bindPopup(firePopup(d));
 }
 function renderFires(animate = false) {
@@ -151,7 +169,7 @@ function renderFires(animate = false) {
   const dets = [...state.fires.detections].sort((a, b) => a.time_utc.localeCompare(b.time_utc));
   const latest = dets.length ? Date.parse(dets[dets.length - 1].time_utc) : Date.now();
   if (!animate) { dets.forEach((d) => fireMarker(d, latest).addTo(layers.fires)); return; }
-  const step = Math.min(40, 2200 / Math.max(1, dets.length));
+  const step = reduceMotion ? 0 : Math.min(40, 2200 / Math.max(1, dets.length));
   dets.forEach((d, i) => setTimeout(() => fireMarker(d, latest).addTo(layers.fires), i * step));
 }
 
@@ -197,12 +215,13 @@ function firesInCell(id) {
   if (!state.fires || !state.firesRevealed) return null;
   return state.fires.detections.filter((d) => d.cell_id === id).length;
 }
-function selectCell(id, { fly = true } = {}) {
+function selectCell(id, { fly = true, focus = false } = {}) {
   const c = cellById(id);
   if (!c) return;
   state.selected = id;
   highlight();
-  if (fly && map.getZoom() < 7) map.flyTo([c.lat, c.lon], 7, { duration: 0.8 });
+  if (fly && map.getZoom() < 7) go([c.lat, c.lon], 7);
+  else if (fly && !map.getBounds().pad(-0.15).contains([c.lat, c.lon])) go([c.lat, c.lon], map.getZoom());
   const n = state.risk.cells.length;
   const fic = firesInCell(id);
   const factors = [...c.factors].sort((a, b) => b.points - a.points);
@@ -211,11 +230,11 @@ function selectCell(id, { fly = true } = {}) {
   panel.innerHTML = `
     <button class="close" aria-label="Close">×</button>
     <div class="eyebrow">AREA ${esc(c.id)} · ${c.lat.toFixed(2)}°, ${c.lon.toFixed(2)}°</div>
-    <h2>${esc(c.name)}</h2>
+    <h2 tabindex="-1">${esc(c.name)}</h2>
     <div class="score-row">
       <div class="score" style="--c:${riskColor(c.risk)}">${Math.round(c.risk)}<span>/100</span></div>
       <div>
-        <span class="chip" style="background:${CAT_COLORS[c.category]}">${esc(c.category)} risk</span>
+        <span class="chip" style="background:${catColor(c.category)};color:${catTextColor(c.category)}">${esc(c.category)} risk</span>
         <div class="muted small" style="margin-top:6px">Rank #${c.rank} of ${n} areas statewide</div>
         ${c.ml_prob != null ? `<div class="small" style="margin-top:2px">ML model: <b>${(c.ml_prob * 100).toFixed(0)}%</b> chance of a new fire within 7 days</div>` : ''}
         ${fic != null ? `<div class="muted small">${fic} fire detection${fic === 1 ? '' : 's'} here ${state.asOf ? 'in the next 72 h' : 'in the last 48 h'}</div>` : ''}
@@ -230,6 +249,7 @@ function selectCell(id, { fly = true } = {}) {
         <div class="f-exp">${f.value == null ? 'no data — weight redistributed' : esc(f.explain)}</div>
       </li>`).join('')}
     </ul>
+    ${stationBlock(c)}
     <p class="gate muted">Points = 100 × weight × factor score × fuel gate (×${c.fuel_gate.toFixed(2)}). Wet vegetation shrinks the gate, so wind over green hills doesn't read as fire weather.</p>
 
     <h3>AI briefing <span class="engine" id="engine">…</span></h3>
@@ -253,6 +273,14 @@ function selectCell(id, { fly = true } = {}) {
   loadBriefing(id);
   if ($('#history')) loadHistory(id);
   setTimeout(() => renderPasses(c), 30);
+  const top = factors[0];
+  announce(`${c.name}. Risk ${Math.round(c.risk)} out of 100, ${c.category}. Rank ${c.rank} of ${n}. Biggest factor: ${top.label}, ${top.explain}.`);
+  if (focus) $('h2', panel).focus({ preventScroll: true });
+}
+function announce(text) {
+  const el = $('#sr-status');
+  el.textContent = '';
+  setTimeout(() => { el.textContent = text; }, 50);
 }
 async function loadHistory(id, days = 7) {
   try {
@@ -293,15 +321,47 @@ async function loadBriefing(id) {
     if (state.selected === id) { $('#briefing').textContent = `Briefing unavailable: ${e.message}`; $('#briefing').classList.remove('loading'); }
   }
 }
+const askApi = (question, cellId) => api('/api/ask', {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ question, cell_id: cellId, as_of: state.asOf }),
+});
+function renderAnswer(el, a) {
+  const trace = a.steps?.length
+    ? `<ol class="trace" aria-label="Tools the agent called">${a.steps.map((s) => `<li class="${s.ok ? '' : 'bad'}">${esc(s.tool)}<span>(${esc(s.args)})</span></li>`).join('')}</ol>` : '';
+  const links = (a.areas || []).filter((id) => id !== state.selected && cellById(id)).slice(0, 4);
+  el.innerHTML = `${trace}<div class="answer-text"></div>
+    ${links.length ? `<div class="row">${links.map((id) => `<button class="btn-ghost area-link" data-id="${esc(id)}">${esc(cellById(id).name)} →</button>`).join('')}</div>` : ''}
+    <div class="note">${esc(a.engine)}${a.steps?.length ? ` · ${a.steps.length} tool call${a.steps.length === 1 ? '' : 's'}` : ''}</div>`;
+  $('.answer-text', el).textContent = a.text;
+  el.querySelectorAll('.area-link').forEach((b) => b.addEventListener('click', () => selectCell(b.dataset.id, { focus: true })));
+  announce(a.text);
+}
 async function ask(id) {
   const q = $('#ask-q').value.trim();
   if (!q) return;
   const out = $('#answer');
-  out.hidden = false; out.textContent = 'Thinking…';
+  out.hidden = false; out.innerHTML = '<div class="muted thinking">Agent is querying live data…</div>';
   try {
-    const a = await api('/api/ask', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: q, cell_id: id, as_of: state.asOf }) });
-    if (state.selected === id) out.textContent = a.text;
+    const a = await askApi(q, id);
+    if (state.selected === id) renderAnswer(out, a);
   } catch (e) { out.textContent = `Error: ${e.message}`; }
+}
+async function askGlobal(q) {
+  state.selected = null; highlight();
+  const panel = $('#panel');
+  panel.hidden = false;
+  panel.innerHTML = `
+    <button class="close" aria-label="Close">×</button>
+    <div class="eyebrow">ASK PYROWATCH · ${state.config?.agent === 'gemini' ? 'GEMINI AGENT' : 'OFFLINE ROUTER'}</div>
+    <h2 tabindex="-1"></h2>
+    <div id="g-answer" class="answer"><div class="muted thinking">Agent is querying live data…</div></div>
+    <p class="note">The agent answers by calling PyroWatch's own tools (area lookup, comparisons, fires nearby, satellite passes, validation, ground stations). Every call is listed above the answer.</p>`;
+  $('h2', panel).textContent = q;
+  $('.close', panel).onclick = closePanel;
+  $('h2', panel).focus({ preventScroll: true });
+  try {
+    renderAnswer($('#g-answer'), await askApi(q, null));
+  } catch (e) { $('#g-answer').textContent = `Error: ${e.message}`; }
 }
 let audio;
 async function listen(id) {
@@ -434,7 +494,7 @@ function tick() {
   t.innerHTML = `<span class="lbl">Fire-watch satellites${state.sats.some((s) => s.simulated) ? ' (simulated orbits)' : ''}</span>${chips.join('')}`;
   t.querySelectorAll('.sat-chip').forEach((b) => b.addEventListener('click', () => {
     const s = state.sats.find((x) => x.name === b.dataset.name);
-    if (s?.pos) map.flyTo([s.pos.lat, s.pos.lon], 4, { duration: 1 });
+    if (s?.pos) go([s.pos.lat, s.pos.lon], 4);
   }));
 }
 function nextPasses(c, hours = 12) {
@@ -499,9 +559,111 @@ function initControls() {
     const k = b.dataset.layer;
     state.show[k] = !state.show[k];
     b.classList.toggle('on', state.show[k]);
+    b.setAttribute('aria-pressed', String(state.show[k]));
     if (state.show[k]) layers[k].addTo(map); else map.removeLayer(layers[k]);
   }));
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
+  $('#palette-btn').onclick = () => {
+    palette = palette === 'safe' ? 'classic' : 'safe';
+    try { localStorage.setItem('pw-palette', palette); } catch (_) { /* storage blocked */ }
+    applyPalette();
+    if (state.risk) { renderRisk(); renderStats(); if (state.selected) selectCell(state.selected, { fly: false }); }
+  };
+  applyPalette();
+  $('#omni').onsubmit = (e) => {
+    e.preventDefault();
+    const q = $('#omni-q').value.trim();
+    if (!q) return;
+    const hit = findArea(q);
+    if (hit) { selectCell(hit, { focus: true }); $('#omni-q').value = ''; } else askGlobal(q);
+  };
+  initKeyboard();
+}
+function applyPalette() {
+  const stops = PALETTES[palette].stops;
+  $('.scale').style.background = `linear-gradient(90deg, ${stops.map(([v, c]) => `rgb(${c.join(',')}) ${v}%`).join(', ')})`;
+  $('#palette-btn').textContent = `Colors: ${PALETTES[palette].label} ⇄`;
+  $('#palette-btn').setAttribute('aria-label', `Color scale: ${PALETTES[palette].label}. Switch.`);
+}
+
+// ------------------------------------------------------------------ keyboard + search
+function cellAt(lat, lon) {
+  const g = state.config.grid;
+  const id = `r${String(Math.floor((lat - g.south) / g.step)).padStart(2, '0')}c${String(Math.floor((lon - g.west) / g.step)).padStart(2, '0')}`;
+  if (cellById(id)) return id;
+  const near = state.risk.cells.reduce((best, c) => {
+    const d = haversineKm(lat, lon, c.lat, c.lon);
+    return d < best.d ? { id: c.id, d } : best;
+  }, { id: null, d: Infinity });
+  return near.d < 60 ? near.id : null;
+}
+function findArea(q) {
+  const ql = q.toLowerCase().replace(/\s+—.*$/, '').trim();
+  const place = state.config.places.find(([n]) => n.toLowerCase() === ql);
+  if (place) return cellAt(place[1], place[2]);
+  const cell = state.risk.cells.find((c) => c.name.toLowerCase() === ql || c.id === ql);
+  return cell ? cell.id : null;
+}
+function buildAreaList() {
+  const opts = [...state.config.places.map(([n]) => n), ...state.risk.cells.filter((c) => !c.name.endsWith(' area')).map((c) => c.name)];
+  $('#area-list').innerHTML = [...new Set(opts)].sort().map((n) => `<option value="${esc(n)}"></option>`).join('');
+}
+function neighbor(id, dr, dc) {
+  const m = /^r(\d+)c(\d+)$/.exec(id);
+  if (!m) return null;
+  for (let k = 1; k <= 4; k++) {
+    const nid = `r${String(+m[1] + dr * k).padStart(2, '0')}c${String(+m[2] + dc * k).padStart(2, '0')}`;
+    if (cellById(nid)) return nid;
+  }
+  return null;
+}
+function initKeyboard() {
+  const moves = { ArrowUp: [1, 0], ArrowDown: [-1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
+  document.addEventListener('keydown', (e) => {
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
+    if (e.key === 'Escape') { if (typing) document.activeElement.blur(); else closePanel(); return; }
+    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '/') { e.preventDefault(); $('#omni-q').focus(); return; }
+    if (e.key === '+' || e.key === '=') { map.zoomIn(); return; }
+    if (e.key === '-') { map.zoomOut(); return; }
+    if (moves[e.key] && state.risk) {
+      e.preventDefault();
+      const from = state.selected || state.risk.top[0].id;
+      const next = state.selected ? neighbor(from, ...moves[e.key]) : from;
+      if (next) selectCell(next, { focus: true });
+    }
+  });
+}
+
+// ------------------------------------------------------------------ ground stations (PyroWatch Beacons)
+const stationIcon = (label) => L.divIcon({
+  className: '', iconSize: [140, 22], iconAnchor: [10, 11],
+  html: `<div class="station-icon"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 13v9M8 22h8" stroke="#5eead4" stroke-width="2" fill="none"/><circle cx="12" cy="11" r="2.4" fill="#5eead4"/><path d="M7.5 6.5a6.4 6.4 0 0 0 0 9M16.5 6.5a6.4 6.4 0 0 1 0 9M4.6 3.6a10.5 10.5 0 0 0 0 14.8M19.4 3.6a10.5 10.5 0 0 1 0 14.8" stroke="#5eead4" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>${esc(label)}</div>`,
+});
+const ago = (iso) => {
+  const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  return m < 1 ? 'just now' : m < 90 ? `${m} min ago` : `${(m / 60).toFixed(1)} h ago`;
+};
+const fmtReading = (r) => [r.temp_c != null ? `${r.temp_c.toFixed(1)} °C` : null, r.rh_pct != null ? `${r.rh_pct.toFixed(0)}% RH` : null, r.smoke_raw != null ? `smoke ${Math.round(r.smoke_raw)}` : null].filter(Boolean).join(' · ') || 'no sensor data';
+async function pollStations() {
+  try {
+    const { stations } = await api('/api/stations');
+    state.stations = stations;
+    layers.stations.clearLayers();
+    for (const s of stations) {
+      L.marker([s.lat, s.lon], { pane: 'sats', icon: stationIcon(s.label), keyboard: false })
+        .bindPopup(`<b>Ground station · ${esc(s.label)}</b><br>${esc(fmtReading(s.latest))}<br><span class="muted small">${esc(s.place)} · ${esc(ago(s.latest.time_utc))}</span>`)
+        .addTo(layers.stations);
+    }
+    const t = $('.toggle[data-layer="stations"]');
+    t.hidden = !stations.length;
+    t.querySelector('.count').textContent = stations.length ? ` (${stations.length})` : '';
+  } catch (_) { /* stations are optional */ }
+}
+function stationBlock(c) {
+  const here = state.stations.filter((s) => s.cell_id === c.id && Date.now() - Date.parse(s.latest.time_utc) < 3 * 3.6e6);
+  if (!here.length) return '';
+  return `<div class="ground"><b>On the ground:</b> ${here.map((s) => `${esc(s.label)} measured ${esc(fmtReading(s.latest))} <span class="muted">(${esc(ago(s.latest.time_utc))})</span>`).join('<br>')}
+    ${c.raw.rh_min_pct != null ? `<div class="muted small">Forecast minimum humidity for this area: ${c.raw.rh_min_pct.toFixed(0)}%</div>` : ''}</div>`;
 }
 
 (async function init() {
@@ -512,5 +674,7 @@ function initControls() {
   }
   initControls();
   initSatellites();
+  pollStations();
+  setInterval(pollStations, 20000);
   await loadData();
 })();

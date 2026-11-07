@@ -33,26 +33,35 @@
       <select id="preset" aria-label="Historical fire event"></select>
       <input id="replay-date" type="date" aria-label="Replay date" min="2002-01-01">
     </div>
+    <form id="omni" role="search">
+      <label for="omni-q" class="sr-only">Find a town, or ask PyroWatch a question</label>
+      <input id="omni-q" type="text" list="area-list" autocomplete="off" placeholder="Find a town, or ask: “where should crews stage tonight?”">
+      <datalist id="area-list"></datalist>
+      <button class="btn-ghost" aria-label="Go">↵</button>
+    </form>
     <div id="window-line"></div>
     <div id="badges"></div>
   </header>
 
   <section id="stats" class="card" aria-live="polite"></section>
 
-  <aside id="panel" class="card" hidden aria-live="polite"></aside>
+  <aside id="panel" class="card" hidden aria-label="Details"></aside>
+  <div id="sr-status" class="sr-only" role="status" aria-live="polite"></div>
 
   <section id="legend" class="card">
     <div class="scale-wrap">
-      <div class="legend-title">Ignition risk index · next 48 h</div>
+      <div class="legend-row"><span class="legend-title">Risk index · next 48 h</span><button id="palette-btn" class="link-btn"></button></div>
       <div class="scale"></div>
       <div class="scale-labels"><span>0 Low</span><span>20</span><span>40 High</span><span>60</span><span>75 Extreme</span><span>100</span></div>
     </div>
     <div class="toggles">
-      <button class="toggle on" data-layer="risk"><span class="sw" style="background:#f46d43"></span>Risk</button>
-      <button class="toggle on" data-layer="fires"><span class="sw" style="background:#ff3b1f;box-shadow:0 0 6px #ff3b1f"></span>Fire detections</button>
-      <button class="toggle on" data-layer="sats"><span class="sw" style="background:#7fd1ff;box-shadow:0 0 6px #7fd1ff"></span>Satellites</button>
+      <button class="toggle on" data-layer="risk" aria-pressed="true"><span class="sw" style="background:#e0533b"></span>Risk</button>
+      <button class="toggle on" data-layer="fires" aria-pressed="true"><span class="sw" style="background:#ff1f1f;box-shadow:0 0 0 1.5px #fff"></span>Fire detections</button>
+      <button class="toggle on" data-layer="sats" aria-pressed="true"><span class="sw" style="background:#7fd1ff;box-shadow:0 0 6px #7fd1ff"></span>Satellites</button>
+      <button class="toggle on" data-layer="stations" aria-pressed="true" hidden><span class="sw" style="background:#5eead4;box-shadow:0 0 6px #5eead4"></span>Ground stations<span class="count"></span></button>
     </div>
     <button id="validate" class="btn-primary">Validate: did fires start where we predicted?</button>
+    <div class="keys" aria-hidden="true"><kbd>/</kbd> search or ask · <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> move between areas · <kbd>Esc</kbd> close</div>
   </section>
 
   <section id="ticker" class="card" aria-label="Fire-watch satellites"></section>

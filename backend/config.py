@@ -24,6 +24,8 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb").strip()
 # Tiger Data (TimescaleDB) or any PostgreSQL: time series of predictions and fire detections.
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+# Optional shared secret that PyroWatch Beacons send as X-Station-Token when posting readings.
+STATION_TOKEN = os.getenv("STATION_TOKEN", "").strip()
 
 # "auto": use live APIs, fall back to synthetic data per source if a call fails.
 # "demo": never touch the network (offline rehearsals, bad venue wifi).

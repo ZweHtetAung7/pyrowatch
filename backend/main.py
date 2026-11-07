@@ -1,14 +1,17 @@
 """PyroWatch API + static frontend.  Run:  uvicorn backend.main:app --reload"""
 import logging
+import unicodedata
 from datetime import date
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import ai, risk, sources, store
-from .config import DATA_MODE, ELEVENLABS_API_KEY, FIRMS_MAP_KEY, FRONTEND_DIR, GEMINI_API_KEY, GEMINI_MODEL, GRID_STEP_DEG
+from . import agent, ai, ground, risk, sources, store
+from .config import (DATA_MODE, ELEVENLABS_API_KEY, FIRMS_MAP_KEY, FRONTEND_DIR, GEMINI_API_KEY, GEMINI_MODEL,
+                     GRID_STEP_DEG, STATION_TOKEN)
+from .geo import CA_BBOX, PLACES, cell_for_point, haversine_km
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 app = FastAPI(title="PyroWatch", version="0.1")
@@ -60,9 +63,12 @@ def config():
         "has_gemini": bool(GEMINI_API_KEY),
         "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None,
         "has_tts": bool(ELEVENLABS_API_KEY),
+        "agent": "gemini" if GEMINI_API_KEY else "offline router",
         "has_ml_model": risk.load_model() is not None,
         "database": store.status(),
         "replay_presets": REPLAY_PRESETS,
+        "places": [[n, la, lo] for n, la, lo in PLACES],
+        "grid": {"west": CA_BBOX[0], "south": CA_BBOX[1], "step": GRID_STEP_DEG},
         "factors": risk.FACTORS,
     }
 
@@ -103,10 +109,8 @@ class AskBody(BaseModel):
 
 @app.post("/api/ask")
 def post_ask(body: AskBody):
-    d = _parse_date(body.as_of)
-    payload = risk.compute_risk(d)
-    cell = _cell(payload, body.cell_id) if body.cell_id else None
-    return ai.ask(body.question, cell, payload, _fires_in_cell(d, body.cell_id) if cell else None)
+    """Gemini function-calling agent over PyroWatch's own data. Returns the answer + tool trace."""
+    return agent.run(body.question, _parse_date(body.as_of), body.cell_id)
 
 
 @app.get("/api/tts/{cell_id}")
@@ -125,6 +129,83 @@ def get_tts(cell_id: str, as_of: str | None = None):
 def get_history(cell_id: str, days: int = Query(14, ge=1, le=365)):
     """Risk over time + daily fire detections for one area, from Tiger Data (if configured)."""
     return store.cell_history(cell_id, days)
+
+
+# ------------------------------------------------------------------ hardware: PyroWatch Beacon
+
+LEVELS = ["Low", "Moderate", "High", "Very high", "Extreme"]
+
+
+def _ascii(s):
+    """OLED fonts are ASCII-only."""
+    for a, b in (("°", ""), ("±", "+/-"), ("·", "-"), ("–", "-"), ("→", "->")):
+        s = s.replace(a, b)
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+
+
+@app.get("/api/beacon")
+def get_beacon(lat: float, lon: float, radius_km: float = Query(50, ge=5, le=300)):
+    """Compact live status for one location, sized for a microcontroller."""
+    cid = cell_for_point(lat, lon)
+    if not cid:
+        raise HTTPException(404, "location is outside PyroWatch's California grid")
+    payload = risk.compute_risk(None)
+    cell = _cell(payload, cid)
+    fires = risk.fires(None, 2)
+    near = sorted((haversine_km(lat, lon, d["lat"], d["lon"]), d) for d in fires["detections"])
+    near = [(k, d) for k, d in near if k <= radius_km]
+    top = max(cell["factors"], key=lambda f: f["points"])
+    demo = fires["source"]["mode"] != "live" or any(s["mode"] != "live" for s in payload["sources"].values())
+    return {
+        "area": _ascii(cell["name"]),
+        "cell_id": cid,
+        "risk": round(cell["risk"]),
+        "category": cell["category"],
+        "level": LEVELS.index(cell["category"]),
+        "rank": cell["rank"],
+        "of": len(payload["cells"]),
+        "fires_nearby": len(near),
+        "radius_km": radius_km,
+        "nearest_fire_km": round(near[0][0], 1) if near else None,
+        "latest_fire_utc": max((d["time_utc"] for _, d in near), default=None),
+        "top_factor": _ascii(f"{top['label']}: {top['explain']}")[:90],
+        "as_of": payload["as_of"],
+        "generated_at": payload["generated_at"],
+        "demo": demo,
+    }
+
+
+class Reading(BaseModel):
+    lat: float
+    lon: float
+    temp_c: float | None = None
+    rh_pct: float | None = None
+    smoke_raw: float | None = None
+    label: str | None = None
+
+
+@app.post("/api/stations/{station_id}")
+def post_station(station_id: str, reading: Reading, x_station_token: str | None = Header(None)):
+    """A ground station (PyroWatch Beacon with a sensor) reports a reading."""
+    if STATION_TOKEN and x_station_token != STATION_TOKEN:
+        raise HTTPException(401, "bad or missing X-Station-Token")
+    try:
+        return ground.record(station_id, reading.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.get("/api/stations")
+def get_stations(max_age_hours: float = Query(24, gt=0, le=720)):
+    return {"stations": ground.list_stations(max_age_hours)}
+
+
+@app.get("/api/stations/{station_id}/history")
+def get_station_history(station_id: str):
+    h = ground.history(station_id)
+    if h is None:
+        raise HTTPException(404, "unknown station")
+    return {"id": station_id, "readings": h}
 
 
 @app.get("/api/health")

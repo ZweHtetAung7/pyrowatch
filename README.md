@@ -5,7 +5,9 @@
 PyroWatch is a live wildfire-ignition risk map for the next 48 hours. It combines NASA satellite fire
 detections (VIIRS and MODIS via FIRMS), weather forecasts, fuel dryness, terrain and 5 years of fire
 history. It explains each area's score factor by factor, writes a plain-language briefing with Gemini,
-and shows the satellites doing the watching as they orbit overhead.
+answers questions through a Gemini agent that queries the live data itself, and shows the satellites
+doing the watching as they orbit overhead. On the ground, an ESP32 **PyroWatch Beacon** turns one
+location's risk into lights, a fire-danger dial and an alarm, and reports local sensor readings back.
 
 Then it **proves itself**: replay a past fire (e.g. the January 2025 LA windstorm), see what the map
 said *before* ignition, click **Reveal what happened next** to watch the real detections appear, and
@@ -38,7 +40,8 @@ accident. Set `PYROWATCH_DATA_MODE=demo` to force fully offline mode (for rehear
 | `ELEVENLABS_API_KEY` | optional: "Listen to briefing" voice | elevenlabs.io |
 | `DATABASE_URL` | optional: Tiger Data time series (risk history chart, recorded predictions) | console.cloud.timescale.com: free service, copy its connection string |
 
-Open-Meteo (weather, terrain) and CelesTrak (orbits) need no key.
+Open-Meteo (weather, terrain) and CelesTrak (orbits) need no key. `STATION_TOKEN` (optional) is a
+shared secret that beacons must send to post readings.
 
 ### Before the demo (do this early!)
 
@@ -108,6 +111,33 @@ synthetic data, as a pipeline test only.
 
 ---
 
+## Ask PyroWatch (Gemini agent)
+
+Type a town in the search box to jump to it, or type a question ("Why is Malibu higher than Santa
+Barbara?", "When will a satellite next see Paradise?", "Where should crews stage tonight?").
+Gemini answers with **function calling** over eight tools that run the same code as the map:
+`find_area`, `top_areas`, `compare_areas`, `fires_near`, `satellite_passes` (server-side SGP4),
+`statewide_summary`, `validation` and `ground_stations`. It may chain several calls, and every call
+is shown above the answer, so judges can see that the agent does real work and doesn't make up
+numbers. Without a Gemini key, a keyword router calls the same tools.
+
+## Accessibility
+
+- The default color scale gets steadily lighter from low to high risk, so it reads correctly with
+  any type of color blindness and in grayscale. "Colors: Classic" switches to green → red.
+- Keyboard: `/` focuses search, arrow keys move between neighboring areas, `+`/`-` zoom, `Esc` closes.
+- Screen readers: each selection is announced ("Pasadena area. Risk 60 out of 100, Very high…").
+  Toggles expose `aria-pressed`, focus moves to the panel heading, and contrast is AA.
+- `prefers-reduced-motion` turns off fly-to animations, pulsing and the reveal animation.
+
+## Hardware: PyroWatch Beacon
+
+An ESP32 that watches one California location. It drives green/yellow/red LEDs, a servo
+"fire danger" dial and an OLED. It sounds an alarm when risk climbs to Very high or Extreme, or when
+satellites detect new fires within 50 km. With a DHT22 it becomes a ground station whose readings
+appear on the map, in the area panel, in the agent's tools and in Tiger Data.
+Wiring, parts and flashing steps: [firmware/README.md](firmware/README.md).
+
 ## Project layout
 
 ```
@@ -115,18 +145,23 @@ backend/
   main.py      FastAPI routes + serves the frontend
   sources.py   NASA FIRMS, Open-Meteo (forecast / ERA5 archive / elevation), CelesTrak; caching + fallback
   risk.py      features → factor scores → weighted index; validation; prediction ledger
-  ai.py        Gemini briefings & Q&A (template fallback), ElevenLabs voice
-  store.py     Tiger Data / PostgreSQL time series: predictions + detections (optional)
+  ai.py        Gemini briefings (template fallback), ElevenLabs voice
+  agent.py     "Ask PyroWatch": Gemini function-calling agent over 8 tools (offline router fallback)
+  orbits.py    server-side SGP4 satellite passes (used by the agent)
+  ground.py    ground stations: readings posted by PyroWatch Beacons
+  store.py     Tiger Data / PostgreSQL time series: predictions, detections, ground readings (optional)
   geo.py       California outline, analysis grid, place names
   demo.py      synthetic stand-ins for every source (offline mode)
 frontend/      index.html, app.js (Leaflet + satellite.js SGP4 orbits), style.css, vendor/
 scripts/       build_fire_history.py, train_model.py
 deploy/        Vultr setup script, systemd unit, Caddyfile (HTTPS for your domain)
+firmware/      PyroWatch Beacon: ESP32 sketch, config template, wiring guide
 data/          ledger/ (commit it!), cache/ (ignored), fire_history.json, model.joblib
 ```
 
 API: `/api/risk?as_of=`, `/api/fires?as_of=&days=`, `/api/validate?as_of=`, `/api/briefing/{cell}`,
-`POST /api/ask`, `/api/tts/{cell}`, `/api/history/{cell}`, `/api/satellites`, `/api/config`.
+`POST /api/ask` (agent), `/api/tts/{cell}`, `/api/history/{cell}`, `/api/satellites`, `/api/config`,
+`/api/beacon?lat=&lon=` (compact status for microcontrollers), `POST /api/stations/{id}`, `/api/stations`.
 Interactive docs are at `/docs`.
 
 ## Deploy on Vultr (public URL for judges)
@@ -145,15 +180,16 @@ Interactive docs are at `/docs`.
 
 | Person | Owns | Tracks it carries |
 |---|---|---|
-| 1 · Data | `sources.py`, `store.py`, `scripts/build_fire_history.py` | Tiger Data · data quality for everything else |
+| 1 · Data + hardware | `sources.py`, `store.py`, `scripts/build_fire_history.py`, `firmware/` | Best Hardware · Tiger Data |
 | 2 · Model | `risk.py`, `scripts/train_model.py` | Best AI/ML |
 | 3 · Map/UI | `frontend/` | Best UI/UX · Spirit of the Hackathon (orbit layer) |
-| 4 · AI, deploy, pitch | `ai.py`, `deploy/`, Devpost, demo | Gemini · ElevenLabs · Vultr · GoDaddy Registry |
+| 4 · AI, deploy, pitch | `ai.py`, `agent.py`, `deploy/`, Devpost, demo | Gemini · ElevenLabs · Vultr · GoDaddy Registry |
 
-First hour: 1 gets the FIRMS key and runs the history build. 2 checks the replay presets on real data.
-3 does the accessibility pass. 4 gets the Gemini and ElevenLabs keys working, then deploys to Vultr.
+First hour: 1 gets the FIRMS key, starts the history build, then wires and flashes the beacon. 2 checks
+the replay presets on real data. 3 polishes the UI. 4 gets the Gemini and ElevenLabs keys working and
+tries the agent, then deploys to Vultr.
 
-## 90-second demo script
+## 2-minute demo script
 
 1. **Hook (10 s):** "Fire crews don't need to know where fires *are*. Satellites already tell us
    that. They need to know where the next one will start."
@@ -163,9 +199,13 @@ First hour: 1 gets the FIRMS key and runs the history build. 2 checks the replay
    the Palisades and Eaton fire detections appear inside the red zones.
 3. **Proof (15 s):** The validation panel shows hit rate, lift over random and AUC. Say the caveats
    out loud; judges respect it.
-4. **Live (20 s):** Switch to Live. "This is tonight." Show the satellites orbiting and "NOAA-21 passes
-   over this area in 14 min". Ask Gemini a question live.
-5. **Close (5 s):** "Satellites protecting Earth. Every number is real, and the model shows its work."
+4. **Live (20 s):** Switch to Live. "This is tonight." Show the satellites orbiting, then type
+   "Why is Malibu higher than Santa Barbara, and when does a satellite next pass over it?" and point at the
+   agent's tool calls.
+5. **Hardware (10 s):** The beacon on the table watches a California town. Its dial points at the
+   current risk and it beeps when risk escalates or new fires appear nearby. Its sensor reading is
+   on the map as a ground station.
+6. **Close (5 s):** "Satellites in orbit, sensors on the ground, and a model that shows its work."
 
 ## Prize tracks (UB Hacking)
 
@@ -174,30 +214,23 @@ First hour: 1 gets the FIRMS key and runs the history build. 2 checks the replay
 | Track | Our angle | Remaining work |
 |---|---|---|
 | Best General Hack | Real impact, working product, validated against real fires | Polish the demo |
-| Spirit of the Hackathon (deep space) | The satellites are part of the product: live SGP4 orbits of NOAA-20/21, Suomi NPP, Aqua, Terra; each fire shows which satellite saw it from how high; next-pass countdown per area | Lead the pitch with it |
-| Best AI/ML ("real engineering") | Transparent model + trained classifier, time-split evaluation vs. the baseline, validation with hit rate / lift / AUC, and an LLM layer | Run `train_model.py` on real data and put the comparison table in the pitch |
-| Best UI/UX ("clear, accessible") | Factor breakdown, reveal animation, mobile layout | Accessibility pass: colorblind-safe palette, keyboard access to areas |
-| MLH · Best Use of Gemini API | Per-area briefings + grounded Q&A | Upgrade "Ask" to a function-calling agent that queries the live data itself |
+| Spirit of the Hackathon (deep space) | The satellites are part of the product: live SGP4 orbits of NOAA-20/21, Suomi NPP, Aqua, Terra; each fire shows which satellite saw it from how high; next-pass countdowns on the map and from the agent | Lead the pitch with it |
+| Best AI/ML ("real engineering") | Transparent model + trained classifier, time-split evaluation vs. the baseline, validation with hit rate / lift / AUC, plus a function-calling agent | Run `train_model.py` on real data and put the comparison table in the pitch |
+| Best Hardware Hack | PyroWatch Beacon: ESP32 with LEDs, servo dial, buzzer alarm, OLED, DHT22 ground station | Wire it, flash it, make a dial face |
+| Best UI/UX ("clear, accessible") | Colorblind-safe scale, keyboard navigation, screen-reader announcements, reduced motion, mobile layout | Polish |
+| MLH · Best Use of Gemini API | Gemini agent with 8 tools + per-area briefings | Get a key and test real questions |
 
 **Cheap add-ons (under 1 hour each)**
 
 | Track | How |
 |---|---|
 | MLH · ElevenLabs | Already wired: add `ELEVENLABS_API_KEY` and the "Listen to briefing" button appears |
-| MLH · Tiger Data | Already wired: create a free Tiger Cloud service and set `DATABASE_URL`. Stores every prediction and detection as time series (hypertables) and draws the risk-history chart; validation reads recorded predictions from it |
-| MLH · Vultr | `deploy/setup_vultr.sh` (see above): judges get a live URL |
+| MLH · Tiger Data | Already wired: create a free Tiger Cloud service and set `DATABASE_URL`. Predictions, detections and beacon readings become hypertables; drives the risk-history chart and recorded-prediction validation |
+| MLH · Vultr | `deploy/setup_vultr.sh`: judges get a live URL, and the beacon works away from the laptop |
 | MLH · GoDaddy Registry domain | Claim through MLH's link and point it at the Vultr server |
 
-**Maybe**
-
-| Track | Note |
-|---|---|
-| Radial Ventures | Prompt not released yet. Check whether PyroWatch fits when it drops |
-| Best Freshman Hack | Only if every teammate is a first-year |
-| Best Hardware Hack | Only with spare hardware and hours: an ESP32/Arduino "risk beacon" that polls `/api/risk` for a location and lights or beeps, or a temperature/humidity sensor node feeding ground truth |
-| MLH · Solana | Weak fit. Possible angle: write the SHA-256 of each day's prediction to devnet as a tamper-proof timestamp |
-
-Skip: Most Over-Engineered (opposite of our pitch) and Failure to Launch.
+**Not targeting:** Best Freshman Hack (the team are seniors), Solana (weak fit), Most Over-Engineered
+(opposite of our pitch) and Failure to Launch. **Radial Ventures:** check when the prompt drops.
 Ask the organizers whether one project can win several main tracks. MLH prizes are judged separately.
 
 ## Credits & data

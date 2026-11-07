@@ -8,3 +8,4 @@ data/model_metrics.json
 node_modules/
 .DS_Store
 *.zip
+firmware/pyrowatch_beacon/config.h

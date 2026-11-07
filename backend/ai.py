@@ -46,12 +46,15 @@ def _cell_context(cell, risk_payload, fires_in_cell=None):
     }
 
 
-def _gemini(prompt):
+def gemini_request(system, contents, tools=None, temperature=0.4):
+    """One generateContent call (REST). Returns the parsed JSON response."""
     body = {
-        "system_instruction": {"parts": [{"text": SYSTEM}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1024},
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": 1024},
     }
+    if tools:
+        body["tools"] = tools
     if "2.5" in GEMINI_MODEL:  # skip "thinking" for a snappier demo on 2.5 models
         body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
     r = httpx.post(
@@ -61,8 +64,16 @@ def _gemini(prompt):
         timeout=HTTP_TIMEOUT,
     )
     r.raise_for_status()
-    parts = r.json()["candidates"][0]["content"]["parts"]
-    text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+    return r.json()
+
+
+def response_text(resp):
+    parts = resp["candidates"][0].get("content", {}).get("parts", [])
+    return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+
+
+def _gemini(prompt):
+    text = response_text(gemini_request(SYSTEM, [{"role": "user", "parts": [{"text": prompt}]}]))
     if not text:
         raise RuntimeError("empty response")
     return text
@@ -103,28 +114,6 @@ def briefing(cell, risk_payload, fires_in_cell=None):
         result["text"] = _template_briefing(ctx)
     _cache[key] = result
     return result
-
-
-def ask(question, cell, risk_payload, fires_in_cell=None):
-    question = (question or "").strip()[:500]
-    ctx = {
-        "selected_area": _cell_context(cell, risk_payload, fires_in_cell) if cell else None,
-        "statewide_top": risk_payload["top"],
-        "category_counts": risk_payload["counts"],
-        "model": risk_payload["model"],
-    }
-    if not GEMINI_API_KEY:
-        return {"engine": "none", "text": "Set GEMINI_API_KEY to enable questions. Meanwhile, the factor breakdown shows exactly how the score is built."}
-    try:
-        text = _gemini(
-            "Answer the user's question in under 120 words using only the context. "
-            "If the question compares areas, compare their factor points.\n\n"
-            f"Question: {question}\n\nContext (JSON):\n{json.dumps(ctx)}"
-        )
-        return {"engine": GEMINI_MODEL, "text": text}
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Gemini ask failed: %s", exc)
-        return {"engine": "error", "text": f"Gemini request failed ({type(exc).__name__}). Try again in a moment."}
 
 
 def tts(text):

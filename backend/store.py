@@ -3,6 +3,7 @@
 Set DATABASE_URL to your Tiger Cloud service URL (postgres://…) and PyroWatch keeps:
   risk_predictions  every live risk computation, per area (hypertable on recorded_at)
   fire_detections   every satellite fire detection it has fetched (hypertable on time)
+  ground_readings   every reading from a PyroWatch Beacon ground station (hypertable on time)
 
 That powers the "risk over time" chart in each area's panel, and lets /api/validate check a
 *recorded* prediction from the database instead of a hindcast. It works on plain PostgreSQL too
@@ -44,12 +45,22 @@ SCHEMA = [
          frp         real,
          source      text,
          PRIMARY KEY (time, lat, lon, satellite))""",
+    """CREATE TABLE IF NOT EXISTS ground_readings (
+         time        timestamptz      NOT NULL,
+         station_id  text             NOT NULL,
+         lat         double precision NOT NULL,
+         lon         double precision NOT NULL,
+         temp_c      real,
+         rh_pct      real,
+         smoke_raw   real,
+         PRIMARY KEY (station_id, time))""",
     "CREATE INDEX IF NOT EXISTS risk_predictions_asof ON risk_predictions (as_of, recorded_at)",
     "CREATE INDEX IF NOT EXISTS fire_detections_cell ON fire_detections (cell_id, time DESC)",
 ]
 HYPERTABLES = [
     "SELECT create_hypertable('risk_predictions', 'recorded_at', if_not_exists => TRUE, migrate_data => TRUE)",
     "SELECT create_hypertable('fire_detections', 'time', if_not_exists => TRUE, migrate_data => TRUE)",
+    "SELECT create_hypertable('ground_readings', 'time', if_not_exists => TRUE, migrate_data => TRUE)",
 ]
 
 
@@ -67,7 +78,7 @@ def _connect():
     try:
         import psycopg
 
-        conn = psycopg.connect(DATABASE_URL, autocommit=True, connect_timeout=8)
+        conn = psycopg.connect(DATABASE_URL, autocommit=True, connect_timeout=8, client_encoding="UTF8")
         if _state["ready"] is None:
             for sql in SCHEMA:
                 conn.execute(sql)
@@ -147,6 +158,12 @@ def record_detections(dets):
         return len(rows)
 
     return _run(write)
+
+
+def record_ground_reading(station_id, lat, lon, reading):
+    return _run(lambda conn: conn.execute(
+        "INSERT INTO ground_readings VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+        (reading["time_utc"], station_id, lat, lon, reading["temp_c"], reading["rh_pct"], reading["smoke_raw"])))
 
 
 def recorded_prediction(as_of: date):
