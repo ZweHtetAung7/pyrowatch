@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PyroWatch — orbital wildfire early warning</title>
+  <meta name="description" content="Live wildfire-risk map for California built from NASA satellite fire detections, weather, terrain and fire history.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%237fd1ff' stroke-dasharray='3 3'/%3E%3Cpath d='M16 6c3 5 7 7 7 13a7 7 0 0 1-14 0c0-4 2-6 4-8 0 3 1 4 3 5-1-4 0-7 0-10z' fill='%23ff6a2b'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map" aria-label="Wildfire risk map of California"></div>
+
+  <header id="topbar" class="card">
+    <div class="brand">
+      <svg width="38" height="38" viewBox="0 0 32 32" aria-hidden="true">
+        <ellipse cx="16" cy="16" rx="15" ry="6" fill="none" stroke="#7fd1ff" stroke-opacity=".55" stroke-dasharray="2.5 2.5" transform="rotate(-25 16 16)"/>
+        <path d="M16 5c3 5 7.5 7 7.5 13.3a7.5 7.5 0 0 1-15 0c0-4 2-6.4 4.2-8.4 0 3 1 4.3 3 5.3-1-4 .3-7.2.3-10.2z" fill="#ff6a2b"/>
+        <path d="M16 15c1.6 2.4 3.4 3.6 3.4 6a3.4 3.4 0 0 1-6.8 0c0-1.7.9-2.8 1.9-3.7.1 1.3.6 2 1.5 2.5-.4-1.9 0-3.3 0-4.8z" fill="#ffd27a"/>
+        <circle cx="28.6" cy="10" r="1.6" fill="#7fd1ff"/>
+      </svg>
+      <div>
+        <h1>PyroWatch</h1>
+        <p>Satellites watch California so wildfires don't catch us by surprise</p>
+      </div>
+    </div>
+    <div class="tabs" role="tablist">
+      <button id="mode-live" class="tab active" role="tab" aria-selected="true">Live · next 48 h</button>
+      <button id="mode-replay" class="tab" role="tab" aria-selected="false">Replay a past fire</button>
+    </div>
+    <div id="replay-controls" hidden>
+      <select id="preset" aria-label="Historical fire event"></select>
+      <input id="replay-date" type="date" aria-label="Replay date" min="2002-01-01">
+    </div>
+    <div id="window-line"></div>
+    <div id="badges"></div>
+  </header>
+
+  <section id="stats" class="card" aria-live="polite"></section>
+
+  <aside id="panel" class="card" hidden aria-live="polite"></aside>
+
+  <section id="legend" class="card">
+    <div class="scale-wrap">
+      <div class="legend-title">Ignition risk index · next 48 h</div>
+      <div class="scale"></div>
+      <div class="scale-labels"><span>0 Low</span><span>20</span><span>40 High</span><span>60</span><span>75 Extreme</span><span>100</span></div>
+    </div>
+    <div class="toggles">
+      <button class="toggle on" data-layer="risk"><span class="sw" style="background:#f46d43"></span>Risk</button>
+      <button class="toggle on" data-layer="fires"><span class="sw" style="background:#ff3b1f;box-shadow:0 0 6px #ff3b1f"></span>Fire detections</button>
+      <button class="toggle on" data-layer="sats"><span class="sw" style="background:#7fd1ff;box-shadow:0 0 6px #7fd1ff"></span>Satellites</button>
+    </div>
+    <button id="validate" class="btn-primary">Validate: did fires start where we predicted?</button>
+  </section>
+
+  <section id="ticker" class="card" aria-label="Fire-watch satellites"></section>
+
+  <div id="loading"><div class="loader"><div class="orbit"></div><div id="loading-text">Contacting satellites…</div></div></div>
+  <div id="toast" hidden role="alert"></div>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/satellite.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

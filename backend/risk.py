@@ -1,0 +1,369 @@
+"""The PyroWatch risk model.
+
+Transparent weighted index (0-100) per grid cell:
+
+    points_i = 100 * weight_i * factor_i * fuel_gate        total = sum(points_i)
+
+Each factor_i is a 0-1 score from a real measurement (see FACTORS / score_factors), and
+fuel_gate = 0.35 + 0.65 * fuel_dryness, so wet vegetation damps the weather factors: a windy
+day over green hills is not a fire day. The breakdown shown in the UI is exactly these points.
+
+It is a *risk index*, not a calibrated probability. If scripts/train_model.py has been run,
+each cell also gets `ml_prob`: a trained classifier's probability of a new ignition within 7 days.
+"""
+import json
+import logging
+import math
+import statistics
+from datetime import date, datetime, timedelta, timezone
+
+from . import sources
+from .config import DATA_DIR, LEDGER_DIR, MONGODB_URI
+from .geo import build_grid, cell_for_point
+
+log = logging.getLogger("pyrowatch.risk")
+
+FACTORS = [
+    {"key": "fuel", "label": "Fuel dryness", "weight": 0.30},
+    {"key": "wind", "label": "Wind", "weight": 0.20},
+    {"key": "humidity", "label": "Low humidity", "weight": 0.18},
+    {"key": "history", "label": "Fire history", "weight": 0.14},
+    {"key": "heat", "label": "Heat", "weight": 0.10},
+    {"key": "terrain", "label": "Terrain", "weight": 0.08},
+]
+CATEGORIES = [(75, "Extreme"), (60, "Very high"), (40, "High"), (20, "Moderate"), (0, "Low")]
+HISTORY_YEARS = 5
+RAIN_DAY_MM = 2.0
+ML_FEATURES = [
+    "tmax_c", "rh_min_pct", "gust_kmh", "wind_kmh", "days_since_rain", "precip_30d_mm",
+    "vpd_kpa", "relief_m", "fire_days_5y", "month_sin", "month_cos",
+]
+
+
+def clamp01(x):
+    return 0.0 if x is None else max(0.0, min(1.0, x))
+
+
+def category(score):
+    return next(name for floor, name in CATEGORIES if score >= floor)
+
+
+def _agg(rows, var, fn):
+    vals = [r[var] for r in rows if r and r.get(var) is not None]
+    return fn(vals) if vals else None
+
+
+def raw_features(series, as_of: date, relief_m, fire_days_5y):
+    """Measurements for one cell. `series` is {iso_date: {var: value}} from sources.get_weather.
+    The "next 48 h" window is days as_of and as_of+1; antecedent dryness uses the 30 days before."""
+    window = [series.get((as_of + timedelta(days=k)).isoformat()) for k in (0, 1)]
+    past = [series.get((as_of - timedelta(days=k)).isoformat()) for k in range(1, 31)]  # newest first
+
+    days_since_rain, seen = None, 0
+    for row in past:
+        if not row or row.get("precipitation_sum") is None:
+            continue
+        seen += 1
+        if row["precipitation_sum"] >= RAIN_DAY_MM:
+            days_since_rain = seen
+            break
+    if days_since_rain is None and seen:
+        days_since_rain = 30  # no rain day in the whole lookback ("30+")
+
+    peak = max((r for r in window if r and r.get("wind_gusts_10m_max") is not None),
+               key=lambda r: r["wind_gusts_10m_max"], default=None)
+    return {
+        "tmax_c": _agg(window, "temperature_2m_max", max),
+        "rh_min_pct": _agg(window, "relative_humidity_2m_min", min),
+        "gust_kmh": _agg(window, "wind_gusts_10m_max", max),
+        "wind_kmh": _agg(window, "wind_speed_10m_max", max),
+        "wind_dir_deg": peak.get("wind_direction_10m_dominant") if peak else None,
+        "days_since_rain": days_since_rain,
+        "precip_30d_mm": _agg(past, "precipitation_sum", sum),
+        "vpd_kpa": _agg(past[:7] + window, "vapour_pressure_deficit_max", statistics.fmean),
+        "et0_mm": _agg(past[:7], "et0_fao_evapotranspiration", statistics.fmean),
+        "relief_m": relief_m,
+        "fire_days_5y": fire_days_5y,
+        "month_sin": math.sin(2 * math.pi * as_of.month / 12),
+        "month_cos": math.cos(2 * math.pi * as_of.month / 12),
+    }
+
+
+def _fmt(v, unit="", nd=0):
+    return "n/a" if v is None else f"{v:.{nd}f}{unit}"
+
+
+def score_factors(f, lat):
+    """0-1 score per factor plus a human-readable explanation of the raw numbers."""
+    parts = [
+        (0.4, clamp01(f["days_since_rain"] / 30) if f["days_since_rain"] is not None else None),
+        (0.3, 1 - clamp01(f["precip_30d_mm"] / 60) if f["precip_30d_mm"] is not None else None),
+        (0.3, clamp01(f["vpd_kpa"] / 4.0) if f["vpd_kpa"] is not None else None),
+    ]
+    parts = [(w, v) for w, v in parts if v is not None]
+    fuel = sum(w * v for w, v in parts) / sum(w for w, _ in parts) if parts else None
+    dsr = f["days_since_rain"]
+    dsr_txt = "no rain day in 30+ days" if dsr == 30 else f"{dsr} days since rain" if dsr is not None else "rain n/a"
+
+    offshore = f["wind_dir_deg"] is not None and (f["wind_dir_deg"] <= 110 or f["wind_dir_deg"] >= 340)
+    wind_txt = f"gusts to {_fmt(f['gust_kmh'], ' km/h')}"
+    if offshore and lat < 35.8 and (f["gust_kmh"] or 0) >= 40:
+        wind_txt += " · offshore (Santa Ana-type)"
+    elif offshore and lat >= 37 and (f["gust_kmh"] or 0) >= 40:
+        wind_txt += " · offshore (Diablo/north wind)"
+
+    return {
+        "fuel": (fuel, f"{dsr_txt} · {_fmt(f['precip_30d_mm'], ' mm', 1)} in 30 days · VPD {_fmt(f['vpd_kpa'], ' kPa', 1)}"),
+        "wind": (clamp01((f["gust_kmh"] - 15) / 55) if f["gust_kmh"] is not None else None, wind_txt),
+        "humidity": (clamp01((50 - f["rh_min_pct"]) / 45) if f["rh_min_pct"] is not None else None,
+                     f"minimum {_fmt(f['rh_min_pct'], '%')} relative humidity"),
+        "history": (clamp01(math.log1p(f["fire_days_5y"]) / math.log1p(60)) if f["fire_days_5y"] is not None else None,
+                    f"{_fmt(f['fire_days_5y'])} satellite fire-days in the past {HISTORY_YEARS} years"),
+        "heat": (clamp01((f["tmax_c"] - 15) / 25) if f["tmax_c"] is not None else None, f"high of {_fmt(f['tmax_c'], '°C')}"),
+        "terrain": (clamp01(f["relief_m"] / 450) if f["relief_m"] is not None else None,
+                    f"elevation varies ±{_fmt(f['relief_m'], ' m')} across the area"),
+    }
+
+
+def score_cell(f, lat):
+    scored = score_factors(f, lat)
+    avail = [fx for fx in FACTORS if scored[fx["key"]][0] is not None]
+    wsum = sum(fx["weight"] for fx in avail) or 1.0
+    fuel = scored["fuel"][0]
+    gate = 0.35 + 0.65 * (fuel if fuel is not None else 0.5)
+    factors = []
+    for fx in FACTORS:
+        value, explain = scored[fx["key"]]
+        pts = 100 * fx["weight"] / wsum * value * gate if value is not None else 0.0
+        factors.append({**fx, "value": None if value is None else round(value, 3), "points": round(pts, 1), "explain": explain})
+    total = round(sum(x["points"] for x in factors), 1)
+    return total, round(gate, 3), factors
+
+
+# ---------------------------------------------------------------- optional trained model
+
+_model_cache = {"mtime": None, "bundle": None}
+
+
+def load_model():
+    path = DATA_DIR / "model.joblib"
+    if not path.exists():
+        return None
+    mtime = path.stat().st_mtime
+    if _model_cache["mtime"] != mtime:
+        try:
+            import joblib
+
+            _model_cache.update(mtime=mtime, bundle=joblib.load(path))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not load model.joblib: %s", exc)
+            _model_cache.update(mtime=mtime, bundle=None)
+    return _model_cache["bundle"]
+
+
+def ml_vector(f):
+    return [f[k] if f.get(k) is not None else float("nan") for k in ML_FEATURES]
+
+
+# ---------------------------------------------------------------- the main computation
+
+def _cell_inputs(as_of: date):
+    """Raw features for every cell as of `as_of`, plus source statuses."""
+    cells = build_grid()
+    wx, wx_status = sources.get_weather([(c["lat"], c["lon"]) for c in cells], as_of - timedelta(days=31), as_of + timedelta(days=1))
+
+    pts = [p for c in cells for p in c["terrain_points"]]
+    elev, elev_status = sources.get_elevations(pts)
+    relief, i = {}, 0
+    for c in cells:
+        vals = elev[i : i + len(c["terrain_points"])]
+        i += len(c["terrain_points"])
+        relief[c["id"]] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
+
+    hist, hist_status = sources.get_fire_history()
+    years = [str(y) for y in range(as_of.year - HISTORY_YEARS, as_of.year)]  # strictly before as_of: no leakage
+    feats = {}
+    for c, series in zip(cells, wx):
+        fd = sum(hist.get(c["id"], {}).get(y, 0) for y in years)  # no detections on record = 0 fire-days
+        feats[c["id"]] = raw_features(series, as_of, relief[c["id"]], fd)
+    return cells, feats, {"weather": wx_status, "terrain": elev_status, "history": {**hist_status, "years_used": f"{years[0]}–{years[-1]}"}}
+
+
+def compute_risk(as_of: date | None = None):
+    today = sources.today_local()
+    d = as_of or today
+    if d > today:
+        raise ValueError("as_of cannot be in the future")
+    ttl = 1800 if d >= today - timedelta(days=1) else 86400
+    return sources._cached(("risk", d), ttl, lambda: _compute_risk(d, today))
+
+
+def _compute_risk(d: date, today: date):
+    cells, feats, statuses = _cell_inputs(d)
+    bundle = load_model()
+    out = []
+    for c in cells:
+        f = feats[c["id"]]
+        total, gate, factors = score_cell(f, c["lat"])
+        row = {
+            "id": c["id"], "name": c["name"], "lat": c["lat"], "lon": c["lon"], "shape": c["shape"],
+            "risk": total, "category": category(round(total)), "fuel_gate": gate, "factors": factors,
+            "raw": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in f.items() if not k.startswith("month_")},
+        }
+        if bundle:
+            try:
+                row["ml_prob"] = round(float(bundle["model"].predict_proba([ml_vector(f)])[0][1]), 3)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("model prediction failed: %s", exc)
+        out.append(row)
+    ranked = sorted(out, key=lambda r: -r["risk"])
+    for i, r in enumerate(ranked):
+        r["rank"] = i + 1
+    counts = {name: 0 for _, name in CATEGORIES}
+    for r in out:
+        counts[r["category"]] += 1
+    result = {
+        "as_of": d.isoformat(),
+        "window": f"{d.isoformat()} → {(d + timedelta(days=1)).isoformat()} (48 h)",
+        "is_live": d == today,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "model": {"type": "weighted index", "factors": [{k: fx[k] for k in ("key", "label", "weight")} for fx in FACTORS],
+                  "ml": (bundle or {}).get("metrics") if bundle else None},
+        "sources": statuses,
+        "counts": counts,
+        "top": [{"id": r["id"], "name": r["name"], "risk": r["risk"]} for r in ranked[:8]],
+        "cells": out,
+    }
+    if d == today:
+        _record_prediction(result)
+    return result
+
+
+# ---------------------------------------------------------------- prediction ledger
+
+def _record_prediction(result):
+    """Save the first live prediction of each day, so it can later be validated as a *recorded*
+    forecast instead of a hindcast. Skipped if the weather was synthetic."""
+    if result["sources"]["weather"]["mode"] != "live":
+        return
+    path = LEDGER_DIR / f"{result['as_of']}.json"
+    if path.exists():
+        return
+    snap = {
+        "as_of": result["as_of"],
+        "recorded_at": result["generated_at"],
+        "sources": result["sources"],
+        "cells": {c["id"]: {"risk": c["risk"], "category": c["category"], "ml_prob": c.get("ml_prob")} for c in result["cells"]},
+    }
+    path.write_text(json.dumps(snap))
+    if MONGODB_URI:
+        try:
+            from pymongo import MongoClient
+
+            MongoClient(MONGODB_URI, serverSelectionTimeoutMS=4000)["pyrowatch"]["predictions"].insert_one(dict(snap))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("MongoDB write failed: %s", exc)
+
+
+def load_recorded_prediction(d: date):
+    path = LEDGER_DIR / f"{d.isoformat()}.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+# ---------------------------------------------------------------- fires & validation
+
+def fires(as_of: date | None = None, days=2):
+    """Fire detections for the map: the last `days` days (live) or as_of..as_of+days-1 (replay)."""
+    today = sources.today_local()
+    risk = compute_risk(as_of)
+    demo_risk = {c["id"]: c["risk"] for c in risk["cells"]}
+    start = None if (as_of is None or as_of == today) else as_of
+    dets, status = sources.get_fires(start, days, demo_risk=demo_risk)
+    for det in dets:
+        det["cell_id"] = cell_for_point(det["lat"], det["lon"])
+    return {"as_of": (as_of or today).isoformat(), "days": days, "source": status, "count": len(dets), "detections": dets}
+
+
+def _auc(pos, neg):
+    """ROC AUC via Mann-Whitney U (ties count half)."""
+    if not pos or not neg:
+        return None
+    wins = sum(1.0 if p > n else 0.5 if p == n else 0.0 for p in pos for n in neg)
+    return wins / (len(pos) * len(neg))
+
+
+def validate(as_of: date | None = None, top_fraction=0.2):
+    """Did new fires start where we said risk was high?
+
+    Prediction as of D (recorded in the ledger if we have it, otherwise a hindcast), fires from
+    D to D+2, and "new" means the cell had no detections in the 5 days before D.
+    """
+    today = sources.today_local()
+    d = as_of or (today - timedelta(days=2))
+    if d > today:
+        raise ValueError("as_of cannot be in the future")
+    pred = compute_risk(d)
+    recorded = load_recorded_prediction(d)
+    if recorded:
+        scores = {cid: v["risk"] for cid, v in recorded["cells"].items()}
+        method = f"recorded prediction (saved {recorded['recorded_at']}, before these fires were observed)"
+    else:
+        scores = {c["id"]: c["risk"] for c in pred["cells"]}
+        method = ("hindcast: risk recomputed from data up to the start date, using observed weather "
+                  "in place of the forecast")
+
+    window_days = min(3, (today - d).days + 1)
+    window, w_status = sources.get_fires(d, window_days, demo_risk=scores)
+    prior, p_status = sources.get_fires(d - timedelta(days=5), 5, demo_risk=scores)
+    prior_cells = {cell_for_point(x["lat"], x["lon"]) for x in prior} - {None}
+
+    by_cell = {}
+    for det in window:
+        cid = cell_for_point(det["lat"], det["lon"])
+        if cid is None:
+            continue
+        e = by_cell.setdefault(cid, {"n": 0, "first": det["time_utc"], "max_frp": 0.0, "satellite": det["satellite"]})
+        e["n"] += 1
+        e["max_frp"] = max(e["max_frp"], det["frp"])
+        if det["time_utc"] < e["first"]:
+            e["first"], e["satellite"] = det["time_utc"], det["satellite"]
+    new_cells = {cid: v for cid, v in by_cell.items() if cid not in prior_cells}
+
+    ranked = sorted(scores, key=lambda cid: -scores[cid])
+    rank = {cid: i + 1 for i, cid in enumerate(ranked)}
+    k = max(1, round(len(ranked) * top_fraction))
+    top = set(ranked[:k])
+    hits = [cid for cid in new_cells if cid in top]
+    pos = [scores[cid] for cid in new_cells]
+    neg = [scores[cid] for cid in scores if cid not in by_cell and cid not in prior_cells]
+    hit_rate = len(hits) / len(new_cells) if new_cells else None
+    names = {c["id"]: c for c in pred["cells"]}
+    return {
+        "as_of": d.isoformat(),
+        "fire_window": f"{d.isoformat()} → {(d + timedelta(days=window_days - 1)).isoformat()}",
+        "method": method,
+        "sources": {"prediction": pred["sources"], "fires_window": w_status, "fires_prior": p_status},
+        "n_cells": len(ranked),
+        "top_fraction": top_fraction,
+        "top_threshold": scores[ranked[k - 1]],
+        "new_fire_cells": len(new_cells),
+        "already_burning_cells": len(set(by_cell) & prior_cells),
+        "hits": len(hits),
+        "hit_rate": None if hit_rate is None else round(hit_rate, 3),
+        "lift": None if hit_rate is None else round(hit_rate / top_fraction, 2),
+        "auc": None if _auc(pos, neg) is None else round(_auc(pos, neg), 3),
+        "cells": sorted(
+            [
+                {"id": cid, "name": names[cid]["name"], "lat": names[cid]["lat"], "lon": names[cid]["lon"],
+                 "risk": scores[cid], "rank": rank[cid], "in_top": cid in top, "detections": v["n"],
+                 "first_detection_utc": v["first"], "first_satellite": v["satellite"], "max_frp": round(v["max_frp"], 1)}
+                for cid, v in new_cells.items() if cid in names
+            ],
+            key=lambda x: x["rank"],
+        ),
+        "caveats": [
+            "Satellite detections include some agricultural, prescribed and industrial burns, not only wildfires.",
+            "A 0.5° cell is ~50 km across; this tests regional risk, not exact ignition points.",
+            "The index ranks relative risk; it is not a calibrated probability.",
+        ],
+    }
