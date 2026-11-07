@@ -35,9 +35,11 @@ FACTORS = [
 ]
 CATEGORIES = [(75, "Extreme"), (60, "Very high"), (40, "High"), (20, "Moderate"), (0, "Low")]
 HISTORY_YEARS = 5
-# A new fire area counts as "significant" (likely a wildfire, not a small farm or prescribed burn)
-# when satellites saw it at least this many times in the window, or it burned this hot.
-SIGNIFICANT_MIN_DETECTIONS = 5
+# A fire counts as "significant" (likely a wildfire) when it burned this hot, seen in at least this many
+# detections. Intensity, not count: winter pile burns and farm burns produce many detections at 5-30 MW,
+# while wildfires reach hundreds to thousands of MW. Two detections filters single hot pixels.
+# (Tightened from ">= 5 detections OR >= 50 MW" after the first real-data run; see README.)
+SIGNIFICANT_MIN_DETECTIONS = 2
 SIGNIFICANT_MIN_FRP_MW = 50.0
 RAIN_DAY_MM = 2.0
 ML_FEATURES = [
@@ -347,7 +349,7 @@ def validate(as_of: date | None = None, top_fraction=0.2):
             st = prior_stats.setdefault(cid, {"n": 0, "max_frp": 0.0})
             st["n"] += 1
             st["max_frp"] = max(st["max_frp"], det["frp"])
-    is_big = lambda st: st["n"] >= SIGNIFICANT_MIN_DETECTIONS or st["max_frp"] >= SIGNIFICANT_MIN_FRP_MW  # noqa: E731
+    is_big = lambda st: st["n"] >= SIGNIFICANT_MIN_DETECTIONS and st["max_frp"] >= SIGNIFICANT_MIN_FRP_MW  # noqa: E731
     prior_cells = set(prior_stats)  # any detection before: excluded from the all-hotspot count
     prior_big = {cid for cid, st in prior_stats.items() if is_big(st)}  # a real fire before: excluded from significant
 
@@ -392,7 +394,8 @@ def validate(as_of: date | None = None, top_fraction=0.2):
         "top_threshold": scores[ranked[k - 1]],
         # Headline numbers: significant new fires. Single small hotspots are mostly farm,
         # prescribed or industrial burns; the all-hotspot numbers are reported alongside.
-        "significant_rule": f"at least {SIGNIFICANT_MIN_DETECTIONS} satellite detections in the area, or a peak above {SIGNIFICANT_MIN_FRP_MW:.0f} MW",
+        "significant_rule": (f"a fire intensity peak above {SIGNIFICANT_MIN_FRP_MW:.0f} MW, seen in at least "
+                             f"{SIGNIFICANT_MIN_DETECTIONS} satellite detections"),
         **metrics(significant),
         "all_hotspots": metrics(new_cells),
         "already_burning_cells": len(set(by_cell) & prior_big),

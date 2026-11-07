@@ -93,9 +93,13 @@ get it with `git pull`. Without that file the multiplier is simply off (badge "V
 ### Validation (`/api/validate`)
 
 For a start date D: take the prediction as of D (a recorded ledger snapshot if one exists, otherwise
-a hindcast using only data up to D), then look at FIRMS detections from D to D+2. A **new fire area**
-is a cell with detections in that window and none in the 5 days before. It reports what share of
-new fire areas were in our top 20% (hit rate), lift over random (random = 1.0×) and ROC AUC.
+a hindcast using only data up to D), then look at FIRMS detections from D to D+2. A **significant
+new fire** is an area whose detections in that window peak above 50 MW of fire intensity (in at least
+2 detections), with no such fire there in the 5 days before. It reports what share of those were in
+our top 20% (hit rate), lift over random (random = 1.0×) and ROC AUC, plus the same numbers counting
+every hotspot. We first defined "significant" by count (at least 5 detections); the first real-data
+run showed winter pile and farm burns making dozens of 5–30 MW detections, so we switched to
+intensity. That change was made after seeing the data, which is why both views are always shown.
 
 Be upfront about these caveats. They're printed in the UI too:
 - FIRMS also detects agricultural, prescribed and industrial burns.
