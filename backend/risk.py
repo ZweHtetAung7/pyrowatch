@@ -33,6 +33,10 @@ FACTORS = [
 ]
 CATEGORIES = [(75, "Extreme"), (60, "Very high"), (40, "High"), (20, "Moderate"), (0, "Low")]
 HISTORY_YEARS = 5
+# A new fire area counts as "significant" (likely a wildfire, not a small farm or prescribed burn)
+# when satellites saw it at least this many times in the window, or it burned this hot.
+SIGNIFICANT_MIN_DETECTIONS = 5
+SIGNIFICANT_MIN_FRP_MW = 50.0
 RAIN_DAY_MM = 2.0
 ML_FEATURES = [
     "tmax_c", "rh_min_pct", "gust_kmh", "wind_kmh", "days_since_rain", "precip_30d_mm",
@@ -326,15 +330,24 @@ def validate(as_of: date | None = None, top_fraction=0.2):
         if det["time_utc"] < e["first"]:
             e["first"], e["satellite"] = det["time_utc"], det["satellite"]
     new_cells = {cid: v for cid, v in by_cell.items() if cid not in prior_cells}
+    significant = {cid: v for cid, v in new_cells.items()
+                   if v["n"] >= SIGNIFICANT_MIN_DETECTIONS or v["max_frp"] >= SIGNIFICANT_MIN_FRP_MW}
 
     ranked = sorted(scores, key=lambda cid: -scores[cid])
     rank = {cid: i + 1 for i, cid in enumerate(ranked)}
     k = max(1, round(len(ranked) * top_fraction))
     top = set(ranked[:k])
-    hits = [cid for cid in new_cells if cid in top]
-    pos = [scores[cid] for cid in new_cells]
     neg = [scores[cid] for cid in scores if cid not in by_cell and cid not in prior_cells]
-    hit_rate = len(hits) / len(new_cells) if new_cells else None
+
+    def metrics(fires):
+        hits = [cid for cid in fires if cid in top]
+        rate = len(hits) / len(fires) if fires else None
+        auc = _auc([scores[cid] for cid in fires], neg)
+        return {"new_fire_cells": len(fires), "hits": len(hits),
+                "hit_rate": None if rate is None else round(rate, 3),
+                "lift": None if rate is None else round(rate / top_fraction, 2),
+                "auc": None if auc is None else round(auc, 3)}
+
     names = {c["id"]: c for c in pred["cells"]}
     return {
         "as_of": d.isoformat(),
@@ -344,20 +357,21 @@ def validate(as_of: date | None = None, top_fraction=0.2):
         "n_cells": len(ranked),
         "top_fraction": top_fraction,
         "top_threshold": scores[ranked[k - 1]],
-        "new_fire_cells": len(new_cells),
+        # Headline numbers: significant new fires. Single small hotspots are mostly farm,
+        # prescribed or industrial burns; the all-hotspot numbers are reported alongside.
+        "significant_rule": f"at least {SIGNIFICANT_MIN_DETECTIONS} satellite detections in the area, or a peak above {SIGNIFICANT_MIN_FRP_MW:.0f} MW",
+        **metrics(significant),
+        "all_hotspots": metrics(new_cells),
         "already_burning_cells": len(set(by_cell) & prior_cells),
-        "hits": len(hits),
-        "hit_rate": None if hit_rate is None else round(hit_rate, 3),
-        "lift": None if hit_rate is None else round(hit_rate / top_fraction, 2),
-        "auc": None if _auc(pos, neg) is None else round(_auc(pos, neg), 3),
         "cells": sorted(
             [
                 {"id": cid, "name": names[cid]["name"], "lat": names[cid]["lat"], "lon": names[cid]["lon"],
                  "risk": scores[cid], "rank": rank[cid], "in_top": cid in top, "detections": v["n"],
+                 "significant": cid in significant,
                  "first_detection_utc": v["first"], "first_satellite": v["satellite"], "max_frp": round(v["max_frp"], 1)}
                 for cid, v in new_cells.items() if cid in names
             ],
-            key=lambda x: x["rank"],
+            key=lambda x: (not x["significant"], x["rank"]),
         ),
         "caveats": [
             "Satellite detections include some agricultural, prescribed and industrial burns, not only wildfires.",

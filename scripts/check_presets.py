@@ -3,8 +3,8 @@
   python scripts/check_presets.py                 # all presets
   python scripts/check_presets.py --dates 2021-08-14 2024-07-24   # any other dates too
 
-For each date: the prediction as of that day, the new fires seen by satellite over the next 3 days,
-hit rate in our top 20%, lift over random, ROC AUC, how the area where the famous fire started
+For each date: the prediction as of that day, the significant new fires seen by satellite over the
+next 3 days (and, alongside, every small hotspot), hit rate in our top 20%, lift over random, ROC AUC, how the area where the famous fire started
 ranked the day before, and the top 5 areas. Results are also saved to data/preset_results.md
 (paste-ready) and data/preset_results.json.
 
@@ -52,7 +52,7 @@ def check(d: date, label: str):
     return {
         "date": d.isoformat(), "label": label, "n_cells": v["n_cells"],
         "new_fire_areas": v["new_fire_cells"], "hits": v["hits"], "hit_rate": v["hit_rate"],
-        "lift": v["lift"], "auc": v["auc"], "method": v["method"],
+        "lift": v["lift"], "auc": v["auc"], "method": v["method"], "all_hotspots": v["all_hotspots"],
         "synthetic_inputs": [k for k, m in modes.items() if m != "live"],
         "origins": origins,
         "top5": [{"area": c["name"], "risk": c["risk"], "category": c["category"]}
@@ -76,16 +76,19 @@ def main():
             print(f"  FAILED: {type(exc).__name__}: {exc}")
             results.append({"date": ds, "label": label, "error": f"{type(exc).__name__}: {exc}"})
 
-    lines = ["| Event (prediction date) | New fire areas | In our top 20% | Hit rate | Lift vs random | ROC AUC | Data |",
-             "| --- | --- | --- | --- | --- | --- | --- |"]
+    lines = ["| Event (prediction date) | Significant new fires | In our top 20% | Hit rate | Lift vs random | ROC AUC "
+             "| All hotspots: lift / AUC | Data |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for r in results:
         if "error" in r:
-            lines.append(f"| {r['label']} ({r['date']}) | error: {r['error'][:60]} | | | | | |")
+            lines.append(f"| {r['label']} ({r['date']}) | error: {r['error'][:60]} | | | | | | |")
             continue
         data = "all live" if not r["synthetic_inputs"] else "SYNTHETIC: " + ", ".join(r["synthetic_inputs"])
         lift = "–" if r["lift"] is None else f"{r['lift']}×"
+        a = r["all_hotspots"]
+        all_cols = f"{a['lift']}× / {a['auc']} ({a['new_fire_cells']} areas)" if a["new_fire_cells"] else "–"
         lines.append(f"| {r['label'].split(' (')[0]} ({r['date']}) | {r['new_fire_areas']} | {r['hits']} | "
-                     f"{pct(r['hit_rate'])} | {lift} | {r['auc'] if r['auc'] is not None else '–'} | {data} |")
+                     f"{pct(r['hit_rate'])} | {lift} | {r['auc'] if r['auc'] is not None else '–'} | {all_cols} | {data} |")
     lines.append("")
     lines.append("Where the named fires started, and how PyroWatch ranked that area the day before:")
     lines.append("")

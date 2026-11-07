@@ -388,7 +388,8 @@ async function runValidation() {
 }
 function renderValidation(v) {
   layers.validation.clearLayers();
-  for (const c of v.cells) {
+  const sig = v.cells.filter((c) => c.significant);
+  for (const c of sig) {
     L.circleMarker([c.lat, c.lon], {
       pane: 'validation', radius: 17, fill: false, weight: 2.5, color: c.in_top ? '#ffffff' : '#9fb0c3',
       dashArray: c.in_top ? null : '4 4', className: 'val-ring',
@@ -396,8 +397,9 @@ function renderValidation(v) {
       .on('click', () => selectCell(c.id)).addTo(layers.validation);
   }
   state.selected = null; highlight();
-  const pct = v.hit_rate != null ? Math.round(v.hit_rate * 100) : null;
+  const pc = (x) => (x == null ? '–' : `${Math.round(x * 100)}%`);
   const topPct = Math.round(v.top_fraction * 100);
+  const a = v.all_hotspots || {};
   const panel = $('#panel');
   panel.hidden = false;
   panel.innerHTML = `
@@ -405,22 +407,24 @@ function renderValidation(v) {
     <div class="eyebrow">VALIDATION · PREDICTION ${esc(v.as_of)} · FIRES ${esc(v.fire_window)}</div>
     <h2>Did fires start where we predicted?</h2>
     ${v.new_fire_cells === 0
-      ? `<p class="v-claim">No new fire starts were detected in this window${v.already_burning_cells ? ` (${v.already_burning_cells} area(s) were already burning beforehand)` : ''}. Try a replay date from the presets.</p>`
-      : `<p class="v-claim"><b>${v.hits} of ${v.new_fire_cells}</b> new fire areas (${pct}%) were already in our <b>top ${topPct}%</b> highest-risk areas before any satellite saw them.</p>
+      ? `<p class="v-claim">No significant new fires were detected in this window${v.already_burning_cells ? ` (${v.already_burning_cells} area(s) were already burning beforehand)` : ''}. Try a replay date from the presets.</p>`
+      : `<p class="v-claim"><b>${v.hits} of ${v.new_fire_cells}</b> significant new fires (${pc(v.hit_rate)}) started in areas already in our <b>top ${topPct}%</b> before any satellite saw them.</p>
          <div class="v-hero">
-           <div><div class="k">Hit rate</div><div class="v">${pct}%</div></div>
+           <div><div class="k">Hit rate</div><div class="v">${pc(v.hit_rate)}</div></div>
            <div><div class="k">vs. random</div><div class="v">${v.lift}×</div></div>
            <div><div class="k">ROC AUC</div><div class="v">${v.auc ?? '–'}</div></div>
          </div>
          <p class="muted small">Random guessing would put ${topPct}% of fires in the top ${topPct}% (1.0×). AUC 0.5 = random, 1.0 = perfect ranking.</p>`}
-    <p class="small"><b>Method:</b> ${esc(v.method)}. "New" = no detections in that area in the 5 days before.</p>
-    ${v.cells.length ? `<h3>New fire areas, ranked by our earlier risk score</h3>
-    <ul class="v-list">${v.cells.map((c) => `
+    ${a.new_fire_cells ? `<p class="small">Counting every satellite hotspot, including small farm and prescribed burns: ${a.hits} of ${a.new_fire_cells} (${pc(a.hit_rate)}), ${a.lift}× vs random, AUC ${a.auc ?? '–'}.</p>` : ''}
+    <p class="small"><b>Method:</b> ${esc(v.method)}. "New" = no detections in that area in the 5 days before. "Significant" = ${esc(v.significant_rule)}.</p>
+    ${sig.length ? `<h3>Significant new fires, ranked by our earlier risk score</h3>
+    <ul class="v-list">${sig.map((c) => `
       <li data-id="${esc(c.id)}">
         <span class="rk ${c.in_top ? 'hit' : ''}">#${c.rank}</span>
         <span><b>${esc(c.name)}</b><div class="meta">first seen ${esc(fmtUtc(c.first_detection_utc))} by ${esc(c.first_satellite)} · ${c.detections} detections · peak ${c.max_frp} MW</div></span>
         <span class="pts">${c.risk.toFixed(0)}</span>
       </li>`).join('')}</ul>` : ''}
+    ${v.cells.length > sig.length ? `<p class="note">${v.cells.length - sig.length} smaller hotspot area(s) not listed.</p>` : ''}
     <ul class="caveats">${v.caveats.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`;
   panel.scrollTop = 0;
   $('.close', panel).onclick = () => { layers.validation.clearLayers(); closePanel(); };

@@ -172,8 +172,11 @@ class Tools:
     def validation(self, as_of=None):
         d = date.fromisoformat(as_of) if as_of else self.as_of
         v = risk.validate(d)
-        return {k: v[k] for k in ("as_of", "fire_window", "method", "new_fire_cells", "hits", "hit_rate", "lift", "auc", "caveats")} | {
-            "new_fire_areas": [{k: c[k] for k in ("name", "rank", "risk", "first_detection_utc")} for c in v["cells"][:8]]}
+        keys = ("as_of", "fire_window", "method", "significant_rule", "new_fire_cells", "hits", "hit_rate", "lift", "auc",
+                "all_hotspots", "caveats")
+        return {k: v[k] for k in keys} | {
+            "significant_new_fire_areas": [{k: c[k] for k in ("name", "rank", "risk", "first_detection_utc", "detections")}
+                                           for c in v["cells"] if c["significant"]][:8]}
 
     def ground_stations(self):
         return {"stations": ground.list_stations()}
