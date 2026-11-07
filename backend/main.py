@@ -7,7 +7,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import ai, risk, sources
+from . import ai, risk, sources, store
 from .config import DATA_MODE, ELEVENLABS_API_KEY, FIRMS_MAP_KEY, FRONTEND_DIR, GEMINI_API_KEY, GEMINI_MODEL, GRID_STEP_DEG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -61,6 +61,7 @@ def config():
         "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None,
         "has_tts": bool(ELEVENLABS_API_KEY),
         "has_ml_model": risk.load_model() is not None,
+        "database": store.status(),
         "replay_presets": REPLAY_PRESETS,
         "factors": risk.FACTORS,
     }
@@ -118,6 +119,12 @@ def get_tts(cell_id: str, as_of: str | None = None):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"ElevenLabs request failed: {type(exc).__name__}")
     return Response(audio, media_type="audio/mpeg")
+
+
+@app.get("/api/history/{cell_id}")
+def get_history(cell_id: str, days: int = Query(14, ge=1, le=365)):
+    """Risk over time + daily fire detections for one area, from Tiger Data (if configured)."""
+    return store.cell_history(cell_id, days)
 
 
 @app.get("/api/health")

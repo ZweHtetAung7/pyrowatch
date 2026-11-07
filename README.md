@@ -36,7 +36,7 @@ accident. Set `PYROWATCH_DATA_MODE=demo` to force fully offline mode (for rehear
 | `FIRMS_MAP_KEY` | live fire detections | https://firms.modaps.eosdis.nasa.gov/api/map_key/ (free, emailed in minutes) |
 | `GEMINI_API_KEY` | AI briefings + "Ask PyroWatch" | https://aistudio.google.com/apikey. Set `GEMINI_MODEL` to the current Flash model listed there |
 | `ELEVENLABS_API_KEY` | optional: "Listen to briefing" voice | elevenlabs.io |
-| `MONGODB_URI` | optional: prediction ledger in Atlas | mongodb.com/atlas |
+| `DATABASE_URL` | optional: Tiger Data time series (risk history chart, recorded predictions) | console.cloud.timescale.com: free service, copy its connection string |
 
 Open-Meteo (weather, terrain) and CelesTrak (orbits) need no key.
 
@@ -47,9 +47,10 @@ Open-Meteo (weather, terrain) and CelesTrak (orbits) need no key.
    If the download is slow, grab the MODIS → United States yearly CSVs from https://firms.modaps.eosdis.nasa.gov/country/
    in a browser and run `--csv file1.csv file2.csv …`.
 2. **Click through every Replay preset** with live data and pick the one that tells the best story.
-3. **Record a real prediction.** The first live map each day is saved to `data/ledger/YYYY-MM-DD.json`.
-   Commit it to git right away: the commit timestamp proves the prediction came before the fires.
-   Two days later, "Validate" uses that recorded prediction instead of a hindcast.
+3. **Record a real prediction.** The first live map each day is saved to `data/ledger/YYYY-MM-DD.json`,
+   and with `DATABASE_URL` set, *every* refresh is stored in Tiger Data. Commit the ledger file to
+   git right away: the commit timestamp proves the prediction came before the fires. Two days later,
+   "Validate" uses that recorded prediction instead of a hindcast.
 4. Record a backup video of the demo.
 
 ---
@@ -115,24 +116,42 @@ backend/
   sources.py   NASA FIRMS, Open-Meteo (forecast / ERA5 archive / elevation), CelesTrak; caching + fallback
   risk.py      features → factor scores → weighted index; validation; prediction ledger
   ai.py        Gemini briefings & Q&A (template fallback), ElevenLabs voice
+  store.py     Tiger Data / PostgreSQL time series: predictions + detections (optional)
   geo.py       California outline, analysis grid, place names
   demo.py      synthetic stand-ins for every source (offline mode)
 frontend/      index.html, app.js (Leaflet + satellite.js SGP4 orbits), style.css, vendor/
 scripts/       build_fire_history.py, train_model.py
+deploy/        Vultr setup script, systemd unit, Caddyfile (HTTPS for your domain)
 data/          ledger/ (commit it!), cache/ (ignored), fire_history.json, model.joblib
 ```
 
 API: `/api/risk?as_of=`, `/api/fires?as_of=&days=`, `/api/validate?as_of=`, `/api/briefing/{cell}`,
-`POST /api/ask`, `/api/tts/{cell}`, `/api/satellites`, `/api/config`. Interactive docs are at `/docs`.
+`POST /api/ask`, `/api/tts/{cell}`, `/api/history/{cell}`, `/api/satellites`, `/api/config`.
+Interactive docs are at `/docs`.
+
+## Deploy on Vultr (public URL for judges)
+
+1. Create a Vultr Cloud Compute instance (Ubuntu 24.04; the smallest plan is fine) using the MLH credits.
+2. Register the domain through GoDaddy Registry and point an **A record** at the instance's IP.
+3. On the server:
+   ```bash
+   git clone https://github.com/ZweHtetAung7/pyrowatch.git /opt/pyrowatch && cd /opt/pyrowatch
+   cp .env.example .env && nano .env            # paste keys
+   sudo bash deploy/setup_vultr.sh your-domain.example
+   ```
+   This installs the app as a systemd service behind Caddy, which serves HTTPS automatically.
 
 ## Team split
 
-| Person | Owns | First task |
+| Person | Owns | Tracks it carries |
 |---|---|---|
-| 1 · Data | `sources.py`, `scripts/build_fire_history.py` | Get the FIRMS key and confirm live fires on the map. Build the fire history. |
-| 2 · Model | `risk.py`, `scripts/train_model.py` | Check replay presets on real data and tune weights/thresholds. Then train the ML model. |
-| 3 · Map/UI | `frontend/` | Polish, mobile, the reveal animation, county names. |
-| 4 · AI + pitch | `ai.py`, Devpost, demo | Gemini prompt, voice, .tech domain, 90-second script, backup video. |
+| 1 · Data | `sources.py`, `store.py`, `scripts/build_fire_history.py` | Tiger Data · data quality for everything else |
+| 2 · Model | `risk.py`, `scripts/train_model.py` | Best AI/ML |
+| 3 · Map/UI | `frontend/` | Best UI/UX · Spirit of the Hackathon (orbit layer) |
+| 4 · AI, deploy, pitch | `ai.py`, `deploy/`, Devpost, demo | Gemini · ElevenLabs · Vultr · GoDaddy Registry |
+
+First hour: 1 gets the FIRMS key and runs the history build. 2 checks the replay presets on real data.
+3 does the accessibility pass. 4 gets the Gemini and ElevenLabs keys working, then deploys to Vultr.
 
 ## 90-second demo script
 
@@ -148,20 +167,38 @@ API: `/api/risk?as_of=`, `/api/fires?as_of=&days=`, `/api/validate?as_of=`, `/ap
    over this area in 14 min". Ask Gemini a question live.
 5. **Close (5 s):** "Satellites protecting Earth. Every number is real, and the model shows its work."
 
-## Prize-track coverage
+## Prize tracks (UB Hacking)
 
-Check this against the official UB Hacking track list and drop anything that isn't offered.
+**Core: the project is built for these**
 
-| Track | Why PyroWatch fits |
+| Track | Our angle | Remaining work |
+|---|---|---|
+| Best General Hack | Real impact, working product, validated against real fires | Polish the demo |
+| Spirit of the Hackathon (deep space) | The satellites are part of the product: live SGP4 orbits of NOAA-20/21, Suomi NPP, Aqua, Terra; each fire shows which satellite saw it from how high; next-pass countdown per area | Lead the pitch with it |
+| Best AI/ML ("real engineering") | Transparent model + trained classifier, time-split evaluation vs. the baseline, validation with hit rate / lift / AUC, and an LLM layer | Run `train_model.py` on real data and put the comparison table in the pitch |
+| Best UI/UX ("clear, accessible") | Factor breakdown, reveal animation, mobile layout | Accessibility pass: colorblind-safe palette, keyboard access to areas |
+| MLH · Best Use of Gemini API | Per-area briefings + grounded Q&A | Upgrade "Ask" to a function-calling agent that queries the live data itself |
+
+**Cheap add-ons (under 1 hour each)**
+
+| Track | How |
 |---|---|
-| Best General | Real-world impact, working product, validated against real fires |
-| Best AI/ML | Transparent model + trained classifier with time-split evaluation vs. baseline |
-| Best UI/UX | Mission-control map, factor breakdown, reveal animation, mobile layout |
-| Theme: "Into the Hackosmos" | Live SGP4 orbits of the actual fire-watch satellites, per-detection "seen by NOAA-20 from 830 km", next-pass countdown |
-| MLH · Best use of Gemini API | Per-area briefings + grounded Q&A |
-| MLH · ElevenLabs (if offered) | Spoken briefings ("Listen") |
-| MLH · MongoDB Atlas (if offered) | Prediction ledger: timestamped forecasts for honest validation |
-| MLH · .tech domain (if offered) | e.g. `pyrowatch.tech` |
+| MLH · ElevenLabs | Already wired: add `ELEVENLABS_API_KEY` and the "Listen to briefing" button appears |
+| MLH · Tiger Data | Already wired: create a free Tiger Cloud service and set `DATABASE_URL`. Stores every prediction and detection as time series (hypertables) and draws the risk-history chart; validation reads recorded predictions from it |
+| MLH · Vultr | `deploy/setup_vultr.sh` (see above): judges get a live URL |
+| MLH · GoDaddy Registry domain | Claim through MLH's link and point it at the Vultr server |
+
+**Maybe**
+
+| Track | Note |
+|---|---|
+| Radial Ventures | Prompt not released yet. Check whether PyroWatch fits when it drops |
+| Best Freshman Hack | Only if every teammate is a first-year |
+| Best Hardware Hack | Only with spare hardware and hours: an ESP32/Arduino "risk beacon" that polls `/api/risk` for a location and lights or beeps, or a temperature/humidity sensor node feeding ground truth |
+| MLH · Solana | Weak fit. Possible angle: write the SHA-256 of each day's prediction to devnet as a tamper-proof timestamp |
+
+Skip: Most Over-Engineered (opposite of our pitch) and Failure to Launch.
+Ask the organizers whether one project can win several main tracks. MLH prizes are judged separately.
 
 ## Credits & data
 

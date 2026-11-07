@@ -17,8 +17,8 @@ import math
 import statistics
 from datetime import date, datetime, timedelta, timezone
 
-from . import sources
-from .config import DATA_DIR, LEDGER_DIR, MONGODB_URI
+from . import sources, store
+from .config import DATA_DIR, LEDGER_DIR
 from .geo import build_grid, cell_for_point
 
 log = logging.getLogger("pyrowatch.risk")
@@ -234,8 +234,9 @@ def _compute_risk(d: date, today: date):
         "top": [{"id": r["id"], "name": r["name"], "risk": r["risk"]} for r in ranked[:8]],
         "cells": out,
     }
-    if d == today:
+    if d == today and statuses["weather"]["mode"] == "live":
         _record_prediction(result)
+        store.in_background(store.record_prediction, result)  # every refresh -> a time series in Tiger Data
     return result
 
 
@@ -243,9 +244,7 @@ def _compute_risk(d: date, today: date):
 
 def _record_prediction(result):
     """Save the first live prediction of each day, so it can later be validated as a *recorded*
-    forecast instead of a hindcast. Skipped if the weather was synthetic."""
-    if result["sources"]["weather"]["mode"] != "live":
-        return
+    forecast instead of a hindcast. Only called when the weather was live."""
     path = LEDGER_DIR / f"{result['as_of']}.json"
     if path.exists():
         return
@@ -256,18 +255,15 @@ def _record_prediction(result):
         "cells": {c["id"]: {"risk": c["risk"], "category": c["category"], "ml_prob": c.get("ml_prob")} for c in result["cells"]},
     }
     path.write_text(json.dumps(snap))
-    if MONGODB_URI:
-        try:
-            from pymongo import MongoClient
-
-            MongoClient(MONGODB_URI, serverSelectionTimeoutMS=4000)["pyrowatch"]["predictions"].insert_one(dict(snap))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("MongoDB write failed: %s", exc)
 
 
 def load_recorded_prediction(d: date):
+    """Earliest saved prediction for day d: from Tiger Data if configured, else the ledger file."""
+    from_db = store.recorded_prediction(d)
+    if from_db:
+        return {**from_db, "where": "Tiger Data"}
     path = LEDGER_DIR / f"{d.isoformat()}.json"
-    return json.loads(path.read_text()) if path.exists() else None
+    return {**json.loads(path.read_text()), "where": "ledger file"} if path.exists() else None
 
 
 # ---------------------------------------------------------------- fires & validation
@@ -281,6 +277,8 @@ def fires(as_of: date | None = None, days=2):
     dets, status = sources.get_fires(start, days, demo_risk=demo_risk)
     for det in dets:
         det["cell_id"] = cell_for_point(det["lat"], det["lon"])
+    if status["mode"] == "live":
+        store.in_background(store.record_detections, dets)
     return {"as_of": (as_of or today).isoformat(), "days": days, "source": status, "count": len(dets), "detections": dets}
 
 
@@ -306,7 +304,7 @@ def validate(as_of: date | None = None, top_fraction=0.2):
     recorded = load_recorded_prediction(d)
     if recorded:
         scores = {cid: v["risk"] for cid, v in recorded["cells"].items()}
-        method = f"recorded prediction (saved {recorded['recorded_at']}, before these fires were observed)"
+        method = f"recorded prediction (saved {recorded['recorded_at']} in the {recorded['where']}, before these fires were observed)"
     else:
         scores = {c["id"]: c["risk"] for c in pred["cells"]}
         method = ("hindcast: risk recomputed from data up to the start date, using observed weather "

@@ -125,6 +125,9 @@ select option { background: var(--panel-solid); }
 .pass { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; border: 1px solid var(--line); border-radius: 9px; padding: 6px 9px; }
 .pass b { color: var(--sky); }
 .pass .t { font-family: var(--mono); color: var(--text); white-space: nowrap; }
+.history svg { display: block; border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, 0.02); }
+.spark-legend { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.spark-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: #ff3b1f; vertical-align: middle; }
 .note { font-size: 11.5px; color: var(--faint); margin-top: 6px; }
 
 /* validation */

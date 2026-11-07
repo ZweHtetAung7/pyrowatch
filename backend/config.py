@@ -22,7 +22,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb").strip()
-MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
+# Tiger Data (TimescaleDB) or any PostgreSQL: time series of predictions and fire detections.
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 # "auto": use live APIs, fall back to synthetic data per source if a call fails.
 # "demo": never touch the network (offline rehearsals, bad venue wifi).

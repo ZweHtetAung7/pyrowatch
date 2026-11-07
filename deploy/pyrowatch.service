@@ -1,0 +1,16 @@
+[Unit]
+Description=PyroWatch wildfire risk map
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pyrowatch
+WorkingDirectory=/opt/pyrowatch
+EnvironmentFile=/opt/pyrowatch/.env
+# One worker: caches and the prediction ledger live in this process.
+ExecStart=/opt/pyrowatch/.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
