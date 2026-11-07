@@ -7,3 +7,4 @@ data/model.joblib
 data/model_metrics.json
 node_modules/
 .DS_Store
+*.zip
