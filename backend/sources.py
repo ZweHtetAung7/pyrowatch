@@ -4,6 +4,7 @@ Every getter returns (data, status). `status` says whether the data is live or s
 why, and is passed through to the API response so the UI can badge it.
 """
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -19,6 +20,9 @@ from .config import CACHE_DIR, DATA_DIR, DATA_MODE, FIRMS_MAP_KEY, GRID_STEP_DEG
 from .geo import CA_BBOX, build_grid, in_california
 
 log = logging.getLogger("pyrowatch.sources")
+# httpx logs every request URL at INFO, and FIRMS URLs contain the MAP_KEY: keep those quiet.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 _client = httpx.Client(timeout=HTTP_TIMEOUT, headers={"User-Agent": "PyroWatch/0.1 (hackathon project)"}, follow_redirects=True)
 _mem: dict = {}
 _lock = threading.Lock()
@@ -91,6 +95,22 @@ def _with_fallback(label, live_fn, demo_fn, *, demo_reason=None):
         return demo_fn(), {"source": label, "mode": "demo", "note": note}
 
 
+def _get(url, params=None, retries=0, wait=15.0):
+    """GET that waits and retries on HTTP 429. Open-Meteo's free tier allows ~600 calls a minute
+    per IP (a multi-location request counts once per location), and venue Wi-Fi shares one IP."""
+    for attempt in range(retries + 1):
+        r = _client.get(url, params=params)
+        if r.status_code != 429 or attempt == retries:
+            return r
+        try:
+            delay = float(r.headers.get("Retry-After") or wait)
+        except ValueError:
+            delay = wait
+        log.warning("%s is rate-limiting us; waiting %.0f s (retry %d of %d)", httpx.URL(url).host, delay, attempt + 1, retries)
+        time.sleep(min(delay, 65.0))
+    return r
+
+
 def _chunks(seq, n):
     for i in range(0, len(seq), n):
         yield seq[i : i + n]
@@ -105,6 +125,13 @@ def get_weather(points, start: date, end: date):
     label = "Open-Meteo " + ("forecast" if use_forecast_api else "historical (ERA5)")
     key = ("wx", tuple(points), start, end)
     ttl = 1800 if end >= today - timedelta(days=1) else 7 * 86400
+    # Reanalysis data more than ~5 days old never changes: keep it on disk so reruns and replay
+    # demos cost no API quota.
+    historical = end < today - timedelta(days=6)
+    digest = hashlib.md5(json.dumps([[round(a, 4), round(b, 4)] for a, b in points] + [str(start), str(end), DAILY_VARS]).encode()).hexdigest()[:16]
+    disk_path = CACHE_DIR / f"weather_{digest}.json"
+    if historical and DATA_MODE != "demo" and disk_path.exists():
+        return json.loads(disk_path.read_text()), {"source": label + " (cached)", "mode": "live"}
 
     def live():
         url = "https://api.open-meteo.com/v1/forecast" if use_forecast_api else "https://archive-api.open-meteo.com/v1/archive"
@@ -121,7 +148,7 @@ def get_weather(points, start: date, end: date):
                     "timezone": TIMEZONE,
                     "wind_speed_unit": "kmh",
                 }
-                r = _client.get(url, params=params)
+                r = _get(url, params, retries=3, wait=15)
                 if r.status_code == 400:
                     # An unsupported variable fails the whole call; drop it and retry.
                     reason = r.json().get("reason", "")
@@ -141,6 +168,8 @@ def get_weather(points, start: date, end: date):
                 )
         if len(out) != len(points):
             raise RuntimeError(f"expected {len(points)} locations, got {len(out)}")
+        if historical:
+            disk_path.write_text(json.dumps(out))
         return out
 
     return _cached(key, ttl, lambda: _with_fallback(label, live, lambda: demo.weather_series(points, start, end)))
@@ -155,15 +184,20 @@ def get_elevations(points):
     missing = [p for p, k in zip(points, keys) if k not in disk]
 
     def live():
+        # ~1,500 points on the first run is more than one minute's free quota, so wait out 429s and
+        # save after every batch: a later run only fetches what is still missing.
+        if len(missing) > 500:
+            log.info("fetching elevation for %d points once (cached afterwards; may take ~3 min)", len(missing))
         for batch in _chunks(missing, 100):
-            r = _client.get(
+            r = _get(
                 "https://api.open-meteo.com/v1/elevation",
-                params={"latitude": ",".join(f"{p[0]:.3f}" for p in batch), "longitude": ",".join(f"{p[1]:.3f}" for p in batch)},
+                {"latitude": ",".join(f"{p[0]:.3f}" for p in batch), "longitude": ",".join(f"{p[1]:.3f}" for p in batch)},
+                retries=6, wait=15,
             )
             r.raise_for_status()
             for p, e in zip(batch, r.json()["elevation"]):
                 disk[f"{p[0]:.3f},{p[1]:.3f}"] = e
-        path.write_text(json.dumps(disk))
+            path.write_text(json.dumps(disk))
         return [disk[k] for k in keys]
 
     if not missing:
