@@ -101,7 +101,7 @@ function renderFooter() {
   const counts = r.counts_by_hazard?.[state.hazard] || r.counts || {};
   const hot = (counts.Extreme || 0) + (counts['Very high'] || 0) + (counts.High || 0);
   const top = r.top_by_hazard?.[state.hazard]?.[0] || r.top?.[0];
-  const topScore = state.hazard === 'wildfire' ? top?.risk : top?.score;
+  const topScore = top?.score ?? top?.risk;  // top_by_hazard rows use score; the older top list uses risk
   const fires = state.asOf && !state.firesRevealed ? 'hidden' : state.fires?.count ?? '–';
   $('#foot-left').textContent = `${state.asOf ? 'Fires (72 h)' : 'Fire detections (48 h)'}: ${fires} · High+ areas: ${hot}/${r.cells.length}`;
   $('#foot-mid').textContent = top ? `Highest ${HAZARDS[state.hazard].label}: ${top.name} · ${Number(topScore).toFixed(0)}` : '';
