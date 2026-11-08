@@ -51,7 +51,7 @@ def _cell_context(cell, risk_payload, fires_in_cell=None):
 
 
 GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
-_model = {"name": GEMINI_MODEL, "resolved": False}
+_model = {"name": GEMINI_MODEL}
 
 
 class GeminiError(RuntimeError):
@@ -93,12 +93,17 @@ def current_model():
     return _model["name"]
 
 
+RETRYABLE = (404, 429, 500, 503)  # retired model, quota or overload: another model may work
+
+
 def gemini_request(system, contents, tools=None, temperature=0.4):
     """One generateContent call (REST). Returns the parsed JSON response.
-    If the configured model doesn't exist (retired names 404), switch once to the best
-    available Flash model and remember it."""
-    for attempt in range(2):
-        model = _model["name"]
+
+    If the model is retired (404), rate-limited (429) or overloaded (500/503), try the next model
+    this key can use (best Flash first, up to 4 in total) and remember the first one that works.
+    Quotas are per model, so switching also helps with 429s during a busy demo."""
+    model, tried, candidates = _model["name"], [], None
+    while True:
         body = {
             "system_instruction": {"parts": [{"text": system}]},
             "contents": contents,
@@ -110,15 +115,24 @@ def gemini_request(system, contents, tools=None, temperature=0.4):
             body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
         r = httpx.post(f"{GEMINI_API}/models/{model}:generateContent",
                        headers={"x-goog-api-key": GEMINI_API_KEY}, json=body, timeout=HTTP_TIMEOUT)
-        if r.status_code == 404 and attempt == 0 and not _model["resolved"]:
-            _model["resolved"] = True
-            choices = available_models()
-            if choices and choices[0] != model:
-                log.warning("Gemini model %s not found; switching to %s (set GEMINI_MODEL to keep it)", model, choices[0])
-                _model["name"] = choices[0]
+        if r.status_code < 400:
+            if model != _model["name"]:
+                log.warning("Gemini: now using %s (set GEMINI_MODEL=%s in .env to start with it)", model, model)
+                _model["name"] = model
+            return r.json()
+        tried.append(model)
+        if r.status_code in RETRYABLE and len(tried) < 4:
+            if candidates is None:
+                try:
+                    candidates = available_models()
+                except Exception:  # noqa: BLE001 - can't list models: report the original error
+                    candidates = []
+            nxt = next((m for m in candidates if m not in tried), None)
+            if nxt:
+                log.warning("Gemini model %s failed (HTTP %s); trying %s", model, r.status_code, nxt)
+                model = nxt
                 continue
         _raise_for(r)
-        return r.json()
 
 
 def response_text(resp):

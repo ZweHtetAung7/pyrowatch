@@ -19,7 +19,7 @@ for d in (DATA_DIR, CACHE_DIR, LEDGER_DIR):
 
 FIRMS_MAP_KEY = os.getenv("FIRMS_MAP_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.7-flash"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb").strip()
 # Tiger Data (TimescaleDB) or any PostgreSQL: time series of predictions and fire detections.
