@@ -18,6 +18,7 @@ import logging
 import math
 import statistics
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 
 from . import sources, store
@@ -29,6 +30,19 @@ log = logging.getLogger("pyrowatch.risk")
 LIVE_FRESH_MINUTES = 60
 RETENTION_DAYS = 14
 _refresh_lock = threading.RLock()
+# The live map is kept in memory too, so it is computed once per server run (and refreshed every few
+# hours) whether or not a database is configured. A 48 h forecast barely changes within 3 hours.
+LIVE_MEMORY_S = 3 * 3600
+_live_memory: dict = {}  # date -> (computed_at, result)
+
+
+def _live_hit(d):
+    hit = _live_memory.get(d)
+    if not hit:
+        return None
+    modes = [s.get("mode") for s in hit[1].get("sources", {}).values() if isinstance(s, dict)]
+    ttl = 120 if "demo" in modes else LIVE_MEMORY_S  # a failed live source is retried soon
+    return hit[1] if time.time() - hit[0] < ttl else None
 
 FACTORS = [
     {"key": "fuel", "label": "Fuel dryness", "weight": 0.30},
@@ -319,15 +333,24 @@ def compute_risk(as_of: date | None = None):
             return snap
     # Live/today: serve a fresh DB snapshot if within LIVE_FRESH_MINUTES (hit once, then reuse).
     if d == today:
+        hit = _live_hit(d)
+        if hit:
+            return hit
         snap = store.get_risk_snapshot(today, max_age_minutes=LIVE_FRESH_MINUTES)
         if snap:
             return snap
         with _refresh_lock:
+            hit = _live_hit(d)
+            if hit:
+                return hit
             snap = store.get_risk_snapshot(today, max_age_minutes=LIVE_FRESH_MINUTES)
             if snap:
+                _live_memory.clear()
+                _live_memory[d] = (time.time(), snap)
                 return snap
-            result = _compute_risk(d, today)
-            store.prune_history(RETENTION_DAYS)
+            result = _compute_risk(d, today)  # also prunes old history in the background
+            _live_memory.clear()
+            _live_memory[d] = (time.time(), result)
             return result
     ttl = 86400
     result = sources._cached(("risk", d), ttl, lambda: _compute_risk(d, today))
