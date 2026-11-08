@@ -16,7 +16,7 @@ Satellites watch from orbit, and beacons report from the ground.
 | 3 LEDs (green, yellow, red) + 3 × 220 Ω resistors | yes |
 | Passive buzzer | recommended |
 | SG90 micro servo + a cardboard dial face (LOW → EXTREME) | recommended: it's the eye-catcher |
-| DHT22 (or DHT11) temperature/humidity sensor | optional (makes it a ground station) |
+| DHT11 temperature/humidity sensor | optional (makes it a ground station) |
 | SSD1306 0.96" OLED, I2C | optional |
 
 ## Wiring (ESP32 DevKit V1)
