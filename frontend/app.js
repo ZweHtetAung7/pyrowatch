@@ -250,6 +250,7 @@ function selectCell(id, { fly = true, focus = false } = {}) {
       <div>
         <span class="chip" style="background:${catColor(c.category)};color:${catTextColor(c.category)}">${esc(c.category)} risk</span>
         <div class="muted small" style="margin-top:6px">Rank #${c.rank} of ${n} areas statewide</div>
+        ${c.raw.ffwi != null ? `<div class="muted small" title="US Forest Service index from temperature, humidity and wind only, used in National Weather Service fire-weather products">Fosberg fire weather index: <b>${Math.round(c.raw.ffwi)}</b>/100 (standard, weather only)</div>` : ''}
         ${c.ml_prob != null ? `<div class="small" style="margin-top:2px">ML model: <b>${(c.ml_prob * 100).toFixed(0)}%</b> chance of a new fire within 7 days</div>` : ''}
         ${fic != null ? `<div class="muted small">${fic} fire detection${fic === 1 ? '' : 's'} here ${state.asOf ? 'in the next 72 h' : 'in the last 48 h'}</div>` : ''}
       </div>
@@ -429,6 +430,7 @@ function renderValidation(v) {
            <div><div class="k">ROC AUC</div><div class="v">${v.auc ?? '–'}</div></div>
          </div>
          <p class="muted small">Random guessing would put ${topPct}% of fires in the top ${topPct}% (1.0×). AUC 0.5 = random, 1.0 = perfect ranking.</p>`}
+    ${v.baseline_ffwi?.significant?.new_fire_cells ? `<p class="small">For comparison, ranking areas by the standard Fosberg fire weather index alone: ${v.baseline_ffwi.significant.hits} of ${v.baseline_ffwi.significant.new_fire_cells} (${pc(v.baseline_ffwi.significant.hit_rate)}), ${v.baseline_ffwi.significant.lift}× vs random, AUC ${v.baseline_ffwi.significant.auc ?? '–'}.</p>` : ''}
     ${a.new_fire_cells ? `<p class="small">Counting every satellite hotspot, including small farm and prescribed burns: ${a.hits} of ${a.new_fire_cells} (${pc(a.hit_rate)}), ${a.lift}× vs random, AUC ${a.auc ?? '–'}.</p>` : ''}
     <p class="small"><b>Method:</b> ${esc(v.method)}. "Significant" = ${esc(v.significant_rule)}; ${esc(v.new_rule || '')}.</p>
     ${sig.length ? `<h3>Significant new fires, ranked by our earlier risk score</h3>

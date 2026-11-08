@@ -52,7 +52,7 @@ def check(d: date, label: str):
     return {
         "date": d.isoformat(), "label": label, "n_cells": v["n_cells"],
         "new_fire_areas": v["new_fire_cells"], "hits": v["hits"], "hit_rate": v["hit_rate"],
-        "lift": v["lift"], "auc": v["auc"], "method": v["method"], "all_hotspots": v["all_hotspots"],
+        "lift": v["lift"], "auc": v["auc"], "method": v["method"], "all_hotspots": v["all_hotspots"], "ffwi": v["baseline_ffwi"]["significant"],
         "synthetic_inputs": [k for k, m in modes.items() if m != "live"],
         "origins": origins,
         "top5": [{"area": c["name"], "risk": c["risk"], "category": c["category"]}
@@ -79,18 +79,27 @@ def main():
             results.append({"date": ds, "label": label, "error": f"{type(exc).__name__}: {exc}"})
 
     lines = ["| Event (prediction date) | Significant new fires | In our top 20% | Hit rate | Lift vs random | ROC AUC "
-             "| All hotspots: lift / AUC | Data |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+             "| Fosberg index alone: hits / lift / AUC | All hotspots: lift / AUC | Data |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for r in results:
         if "error" in r:
-            lines.append(f"| {r['label']} ({r['date']}) | error: {r['error'][:60]} | | | | | | |")
+            lines.append(f"| {r['label']} ({r['date']}) | error: {r['error'][:60]} | | | | | | | |")
             continue
         data = "all live" if not r["synthetic_inputs"] else "SYNTHETIC: " + ", ".join(r["synthetic_inputs"])
         lift = "–" if r["lift"] is None else f"{r['lift']}×"
         a = r["all_hotspots"]
         all_cols = f"{a['lift']}× / {a['auc']} ({a['new_fire_cells']} areas)" if a["new_fire_cells"] else "–"
+        fb = r["ffwi"]
+        ffwi_cols = f"{fb['hits']} / {fb['lift']}× / {fb['auc']}" if fb["new_fire_cells"] else "–"
         lines.append(f"| {r['label'].split(' (')[0]} ({r['date']}) | {r['new_fire_areas']} | {r['hits']} | "
-                     f"{pct(r['hit_rate'])} | {lift} | {r['auc'] if r['auc'] is not None else '–'} | {all_cols} | {data} |")
+                     f"{pct(r['hit_rate'])} | {lift} | {r['auc'] if r['auc'] is not None else '–'} | {ffwi_cols} | {all_cols} | {data} |")
+    ok = [r for r in results if "error" not in r and r["new_fire_areas"]]
+    if ok:
+        n = sum(r["new_fire_areas"] for r in ok)
+        ours, base = sum(r["hits"] for r in ok), sum(r["ffwi"]["hits"] for r in ok)
+        lines.append("")
+        lines.append(f"Pooled over these events: PyroWatch put {ours} of {n} significant new fires in its top 20% "
+                     f"({ours / n / 0.2:.2f}× vs random); the Fosberg index alone put {base} of {n} ({base / n / 0.2:.2f}×).")
     lines.append("")
     lines.append("Where the named fires started, and how PyroWatch ranked that area the day before:")
     lines.append("")

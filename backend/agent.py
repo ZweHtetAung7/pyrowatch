@@ -102,6 +102,7 @@ class Tools:
                               for f in sorted(c["factors"], key=lambda f: -f["points"])]
             out["fuel_gate"] = c["fuel_gate"]
             out["vegetation_multiplier"] = c.get("veg_gate")
+            out["fosberg_fire_weather_index"] = c["raw"].get("ffwi")
             out["vegetation"] = c.get("vegetation")
             if c.get("ml_prob") is not None:
                 out["ml_7day_new_fire_probability"] = c["ml_prob"]

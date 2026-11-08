@@ -106,6 +106,11 @@ Be upfront about these caveats. They're printed in the UI too:
 - 50 km cells test regional risk, not exact ignition points.
 - Hindcasts use observed weather in place of the forecast; recorded predictions don't.
 
+**Baseline: the Fosberg Fire Weather Index.** A standard US Forest Service index from temperature,
+humidity and wind alone, widely used in National Weather Service fire-weather products. It is shown in each
+area's panel, used as an ML feature, and validation ranks areas by it too, so you can see whether
+PyroWatch's extra signals (fuel dryness, vegetation, terrain, fire history) beat the weather-only standard.
+
 To validate every replay preset at once (with the rank of the area where each named fire started),
 run `python scripts/check_presets.py`. It prints a paste-ready table and saves it to `data/preset_results.md`.
 

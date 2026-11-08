@@ -39,6 +39,7 @@ def _cell_context(cell, risk_payload, fires_in_cell=None):
         "factors": [{"factor": f["label"], "points": f["points"], "score_0_1": f["value"], "measured": f["explain"]} for f in cell["factors"]],
         "fuel_gate_multiplier": cell["fuel_gate"],
         "vegetation_multiplier": cell.get("veg_gate"),
+        "fosberg_fire_weather_index_0_100": cell["raw"].get("ffwi"),
         "vegetation": cell.get("vegetation"),
         "ml_7day_ignition_probability": cell.get("ml_prob"),
         "active_fire_detections_in_area_last_48h": fires_in_cell,

@@ -136,6 +136,8 @@ models = {
     "gradient_boosting": HistGradientBoostingClassifier(max_iter=300, learning_rate=0.05, max_leaf_nodes=15, class_weight="balanced"),
 }
 results = {"weighted_index (baseline)": {"roc_auc": roc_auc_score(y[te], baseline[te]), "pr_auc": average_precision_score(y[te], baseline[te])}}
+ffwi_te = np.nan_to_num(X[te][:, risk.ML_FEATURES.index("ffwi")], nan=0.0)
+results["fosberg_index (standard)"] = {"roc_auc": roc_auc_score(y[te], ffwi_te), "pr_auc": average_precision_score(y[te], ffwi_te)}
 fitted = {}
 for name, model in models.items():
     model.fit(X[tr], y[tr])

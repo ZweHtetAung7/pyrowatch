@@ -44,12 +44,33 @@ SIGNIFICANT_MIN_FRP_MW = 50.0
 RAIN_DAY_MM = 2.0
 ML_FEATURES = [
     "tmax_c", "rh_min_pct", "gust_kmh", "wind_kmh", "days_since_rain", "precip_30d_mm",
-    "vpd_kpa", "relief_m", "fire_days_5y", "ndvi", "month_sin", "month_cos",
+    "vpd_kpa", "relief_m", "fire_days_5y", "ndvi", "ffwi", "month_sin", "month_cos",
 ]
 
 
 def clamp01(x):
     return 0.0 if x is None else max(0.0, min(1.0, x))
+
+
+def fosberg_ffwi(temp_c, rh_pct, wind_kmh):
+    """Fosberg Fire Weather Index (Fosberg 1978, US Forest Service), 0-100: how readily fire could
+    spread given temperature, humidity and wind alone (no fuel, vegetation or terrain). It is widely
+    used in National Weather Service fire-weather products. We feed it daily extremes (max
+    temperature, min humidity, max sustained wind), so it reads as that day's worst case."""
+    if None in (temp_c, rh_pct, wind_kmh):
+        return None
+    t = temp_c * 9 / 5 + 32  # deg F
+    h = max(0.0, min(100.0, rh_pct))
+    u = wind_kmh / 1.609344  # mph
+    if h < 10:
+        m = 0.03229 + 0.281073 * h - 0.000578 * h * t
+    elif h < 50:
+        m = 2.22749 + 0.160107 * h - 0.01478 * t
+    else:
+        m = 21.0606 + 0.005565 * h * h - 0.00035 * h * t - 0.483199 * h
+    x = max(0.0, m) / 30  # equilibrium moisture content, as a fraction of 30%
+    eta = max(0.0, 1 - 2 * x + 1.5 * x * x - 0.5 * x ** 3)
+    return round(min(100.0, eta * math.sqrt(1 + u * u) / 0.3002), 1)
 
 
 def category(score):
@@ -78,6 +99,8 @@ def raw_features(series, as_of: date, relief_m, fire_days_5y, ndvi=None):
     if days_since_rain is None and seen:
         days_since_rain = 30  # no rain day in the whole lookback ("30+")
 
+    ffwi_days = [fosberg_ffwi(r.get("temperature_2m_max"), r.get("relative_humidity_2m_min"), r.get("wind_speed_10m_max"))
+                 for r in window if r]
     peak = max((r for r in window if r and r.get("wind_gusts_10m_max") is not None),
                key=lambda r: r["wind_gusts_10m_max"], default=None)
     return {
@@ -93,6 +116,7 @@ def raw_features(series, as_of: date, relief_m, fire_days_5y, ndvi=None):
         "relief_m": relief_m,
         "fire_days_5y": fire_days_5y,
         "ndvi": ndvi,
+        "ffwi": max((v for v in ffwi_days if v is not None), default=None),
         "month_sin": math.sin(2 * math.pi * as_of.month / 12),
         "month_cos": math.cos(2 * math.pi * as_of.month / 12),
     }
@@ -186,8 +210,9 @@ def load_model():
     return _model_cache["bundle"]
 
 
-def ml_vector(f):
-    return [f[k] if f.get(k) is not None else float("nan") for k in ML_FEATURES]
+def ml_vector(f, features=None):
+    """Feature vector in the order the model was trained with (older models keep working)."""
+    return [f[k] if f.get(k) is not None else float("nan") for k in (features or ML_FEATURES)]
 
 
 # ---------------------------------------------------------------- the main computation
@@ -240,7 +265,7 @@ def _compute_risk(d: date, today: date):
         }
         if bundle:
             try:
-                row["ml_prob"] = round(float(bundle["model"].predict_proba([ml_vector(f)])[0][1]), 3)
+                row["ml_prob"] = round(float(bundle["model"].predict_proba([ml_vector(f, bundle.get("features"))])[0][1]), 3)
             except Exception as exc:  # noqa: BLE001
                 log.warning("model prediction failed: %s", exc)
         out.append(row)
@@ -372,18 +397,21 @@ def validate(as_of: date | None = None, top_fraction=0.2):
     rank = {cid: i + 1 for i, cid in enumerate(ranked)}
     k = max(1, round(len(ranked) * top_fraction))
     top = set(ranked[:k])
-    neg = [scores[cid] for cid in scores if cid not in by_cell and cid not in prior_cells]
 
-    def metrics(fires):
-        hits = [cid for cid in fires if cid in top]
+    def metrics(fires, score_map=scores):
+        order = sorted(score_map, key=lambda cid: -score_map[cid])
+        top_k = set(order[:k])
+        negs = [score_map[cid] for cid in score_map if cid not in by_cell and cid not in prior_cells]
+        hits = [cid for cid in fires if cid in top_k]
         rate = len(hits) / len(fires) if fires else None
-        auc = _auc([scores[cid] for cid in fires], neg)
+        auc = _auc([score_map[cid] for cid in fires if cid in score_map], negs)
         return {"new_fire_cells": len(fires), "hits": len(hits),
                 "hit_rate": None if rate is None else round(rate, 3),
                 "lift": None if rate is None else round(rate / top_fraction, 2),
                 "auc": None if auc is None else round(auc, 3)}
 
     names = {c["id"]: c for c in pred["cells"]}
+    ffwi_scores = {c["id"]: (c["raw"].get("ffwi") or 0.0) for c in pred["cells"]}
     return {
         "as_of": d.isoformat(),
         "fire_window": f"{d.isoformat()} → {(d + timedelta(days=window_days - 1)).isoformat()}",
@@ -398,6 +426,8 @@ def validate(as_of: date | None = None, top_fraction=0.2):
                              f"{SIGNIFICANT_MIN_DETECTIONS} satellite detections"),
         **metrics(significant),
         "all_hotspots": metrics(new_cells),
+        # Baseline: the same test, ranking areas by the standard Fosberg fire weather index alone.
+        "baseline_ffwi": {"significant": metrics(significant, ffwi_scores), "all_hotspots": metrics(new_cells, ffwi_scores)},
         "already_burning_cells": len(set(by_cell) & prior_big),
         "new_rule": ("a significant fire counts as new if that area had no significant fire in the 5 days before; "
                      "for all hotspots, no detection at all in the 5 days before"),
