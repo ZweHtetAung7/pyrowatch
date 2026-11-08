@@ -50,9 +50,13 @@ for (const [name, z] of [['labels', 610], ['validation', 615], ['fires', 620], [
   map.createPane(name).style.zIndex = z;
 }
 map.getPane('labels').style.pointerEvents = 'none';
-const CARTO = 'https://{s}.basemaps.cartocdn.com/{style}/{z}/{x}/{y}{r}.png';
-L.tileLayer(CARTO, { style: 'dark_nolabels', subdomains: 'abcd', maxZoom: 18, attribution: '&copy; OpenStreetMap contributors &copy; CARTO · Fire data: NASA FIRMS · Weather: Open-Meteo · Orbits: CelesTrak' }).addTo(map);
-L.tileLayer(CARTO, { style: 'dark_only_labels', subdomains: 'abcd', maxZoom: 18, pane: 'labels' }).addTo(map);
+const ESRI_BASE = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}';
+const ESRI_REF = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
+L.tileLayer(ESRI_BASE, {
+  maxZoom: 16,
+  attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ · Fire data: NASA FIRMS · Weather: Open-Meteo · Orbits: CelesTrak',
+}).addTo(map);
+L.tileLayer(ESRI_REF, { maxZoom: 16, pane: 'labels' }).addTo(map);
 
 const layers = {
   risk: L.layerGroup().addTo(map),
