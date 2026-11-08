@@ -1,0 +1,308 @@
+PYROWATCH — SYSTEM ARCHITECTURE AND IMPROVEMENT NOTES
+====================================================
+
+Snapshot
+--------
+Repository: pyrowatch
+Branch: main
+Source revision: a4ff195 (2026-11-07, "changed the map")
+The report describes the source at that revision. The working tree was clean
+after updating. The local .env file was not opened or included in this report.
+
+1. SYSTEM PURPOSE AND BOUNDARY
+------------------------------
+PyroWatch is a California wildfire-risk visualization and data service. It
+combines forecast weather, terrain, historical fire detections and vegetation
+data into a relative 0–100 risk index for approximately 0.5-degree map cells.
+It also provides fire detections, historical replay/validation, AI-generated
+briefings and Q&A, satellite-orbit visualization, and optional readings from
+ESP32-based PyroWatch Beacons.
+
+This is a small, single-repository application, not a microservice system:
+
+  Browser (static HTML/CSS/JavaScript)
+      | same-origin JSON requests
+      v
+  FastAPI application (one Python process in the documented deployment)
+      |-- data source adapters --> NASA FIRMS, Open-Meteo, CelesTrak
+      |-- optional AI calls -----> Gemini, ElevenLabs
+      |-- optional persistence -> PostgreSQL / TimescaleDB
+      |-- device API <----------- ESP32 Beacon
+      `-- local files ----------> cache, reference datasets, prediction ledger,
+                                  optional trained model
+
+The browser and server independently calculate satellite positions: the
+browser uses satellite.js for map animation and next-pass display; the server
+uses Python sgp4 for the agent's satellite-pass tool.
+
+2. TOP-LEVEL COMPONENTS
+-----------------------
+backend/
+  main.py       FastAPI app, HTTP routes, request validation, and static-file
+                mounting. It is also the primary composition point.
+  risk.py       Grid-wide feature generation, weighted score, optional
+                classifier inference, fire detection lookup and validation.
+  sources.py    NASA FIRMS, Open-Meteo, elevation, CelesTrak and vegetation /
+                history data access; memory/disk caching and demo fallback.
+  geo.py        California polygon, 0.5-degree grid construction, place
+                lookup, coordinate-to-cell mapping and distance calculations.
+  demo.py       Deterministic synthetic substitutes used in demo/offline mode
+                and on individual source failures when mode is "auto".
+  ai.py         Gemini briefing requests and template fallback; ElevenLabs TTS.
+  agent.py      Gemini function-calling Q&A and offline keyword-router fallback.
+  orbits.py     Server-side SGP4 positions and satellite pass calculations.
+  ground.py     Validate and hold recent station readings in process memory;
+                asynchronously forwards readings to the optional database.
+  store.py      Optional PostgreSQL/TimescaleDB schema, prediction/detection/
+                reading writes, validation snapshot reads, and history queries.
+  config.py     Environment/.env loading, filesystem locations and runtime
+                configuration. This report does not disclose local settings.
+
+frontend/
+  index.html    Accessible map shell and controls.
+  app.js        Leaflet rendering, API calls, replay/search, map state, panels,
+                validation, browser-side satellite positions and station
+                polling.
+  style.css     Responsive map/panel styling and visual states.
+  vendor/       Checked-in Leaflet and satellite.js browser libraries.
+
+data/
+  fire_history.json   Historical fire-days by grid cell/year.
+  fire_days.json      Per-cell fire dates used by model-training labels.
+  vegetation.json     Static spring NDVI values and grid/source metadata.
+  model_metrics.json  Model evaluation metadata/results.
+  ledger/             Optional daily first-live-prediction snapshots.
+  cache/              Generated source and training caches; ignored by Git.
+  Other JSON/Markdown files include historical/demo/preset results.
+
+scripts/
+  build_fire_history.py  Ingest FIRMS archive data into fire-history files.
+  fetch_vegetation.py    Fetch and persist MODIS NDVI values.
+  train_model.py         Train/evaluate classifiers and write model artifacts.
+  check_presets.py       Run historical replay checks and save result reports.
+
+firmware/
+  pyrowatch_beacon/      ESP32 Arduino sketch and example configuration.
+  SVG assets and README  Dial/label artwork, wiring and device setup notes.
+
+deploy/
+  setup_vultr.sh         Ubuntu/Vultr setup, Python environment and Caddy setup.
+  pyrowatch.service      systemd service definition.
+  Caddyfile              Reverse proxy and automatic HTTPS configuration.
+
+3. RISK AND DATA PIPELINE
+-------------------------
+1. The default grid step is 0.5 degrees. geo.py clips grid cells to a
+   simplified California outline and creates representative weather anchors
+   and terrain sample points.
+2. risk.py requests weather for the 48-hour forecast window plus a preceding
+   30-day period. Open-Meteo forecast/archive APIs supply weather; elevation
+   comes from Open-Meteo. Historical fire-days and spring NDVI are read from
+   generated local JSON datasets.
+3. The app builds features for each cell and scores six weighted factors:
+   fuel dryness 30%, wind 20%, low humidity 18%, fire history 14%, heat 10%,
+   and terrain 8%. Missing factor measurements are excluded and the remaining
+   weights are redistributed. Fuel dryness and vegetation multipliers reduce
+   scores for wet fuels and sparse vegetation.
+4. The score is a relative index, not an ignition probability. If
+   data/model.joblib exists and loads, a second, seven-day classifier
+   probability is also returned; this is a separate output from the weighted
+   index.
+5. sources.py caches live results in process memory. Weather/elevation and
+   training artifacts may also be cached on disk. In "auto" mode, individual
+   source failures can use deterministic synthetic data; response metadata
+   identifies source modes and the UI presents demo-data indicators.
+6. Active fire observations come from NASA FIRMS. Historical validation
+   compares detections with a recorded daily prediction when available, or
+   labels the calculation as a hindcast when it is recomputed.
+7. Browser requests render grid cells, detections, source status, and
+   validation results on a Leaflet map. Selecting a cell loads its briefing,
+   Q&A, optional persistence history and pass predictions.
+
+External data/services:
+  NASA FIRMS       Active and archival satellite fire detections.
+  Open-Meteo       Forecast, historical weather and elevation.
+  MODIS / ORNL     Vegetation dataset generation through a manual script.
+  CelesTrak        Orbital elements for NOAA-20/21, Suomi NPP, Aqua and Terra.
+  Gemini           Briefing generation and tool-calling Q&A (optional).
+  ElevenLabs       Spoken briefing audio (optional).
+  PostgreSQL /
+  TimescaleDB      Prediction, detection and beacon-reading time series
+                   (optional).
+  Esri             Browser basemap tiles.
+
+4. HTTP INTERFACES
+------------------
+GET  /api/config                         UI configuration and source status
+GET  /api/risk?as_of=                    Per-cell scores and feature breakdown
+GET  /api/fires?as_of=&days=             Active/replay fire detections
+GET  /api/validate?as_of=&top_fraction=  Compare risk ranking with later fires
+GET  /api/satellites                     Current orbital elements/source status
+GET  /api/briefing/{cell_id}?as_of=      AI or template area briefing
+POST /api/ask                            Q&A request; returns answer and tool trace
+GET  /api/tts/{cell_id}?as_of=           Optional spoken briefing
+GET  /api/history/{cell_id}?days=        Optional database time series
+GET  /api/beacon?lat=&lon=&radius_km=    Compact status payload for ESP32
+POST /api/stations/{station_id}          Sensor reading ingestion
+GET  /api/stations?max_age_hours=        Recent stations/readings
+GET  /api/stations/{station_id}/history  In-process station reading history
+GET  /api/health                         Basic process health response
+
+The app also serves the static frontend at /. FastAPI/Pydantic handle request
+shape checks; routes and response shapes are implemented directly in main.py
+and its domain modules. No standalone OpenAPI contract file was found.
+
+5. DATA AND PERSISTENCE
+-----------------------
+Optional database tables defined in store.py:
+  risk_predictions: recorded_at, as_of, cell_id, risk, category, ml_prob,
+                    gust_kmh, rh_min_pct, days_since_rain.
+  fire_detections:  time, lat, lon, cell_id, satellite, instrument,
+                    confidence, frp, source.
+  ground_readings:  time, station_id, lat, lon, temp_c, rh_pct, smoke_raw.
+
+TimescaleDB hypertables are attempted; plain PostgreSQL is supported as a
+fallback. Database access is guarded by a process-wide lock and uses a shared
+connection. Database writes are started in daemon threads. Without a configured
+database, these persistence functions do not persist data.
+
+The ground.py station registry and its bounded recent-reading deque are
+process-memory state. The database stores sensor readings, but current station
+location/label and station history exposed by the station API are served from
+memory. A process restart therefore loses the live station registry until
+devices report again.
+
+The optional JSON ledger stores the first live prediction for each date when
+PYROWATCH_RECORD_LEDGER is enabled. It is intended to be enabled on one
+machine only. Other generated static datasets are built separately by scripts.
+
+6. AI AND DEVICE FLOWS
+----------------------
+AI briefing:
+  selected cell -> /api/briefing -> risk context -> Gemini when configured;
+  otherwise a deterministic template is returned. Failed Gemini calls are
+  logged and fall back to the template. TTS converts briefing text through
+  ElevenLabs when configured.
+
+Q&A agent:
+  /api/ask -> agent.Tools over the same risk/fire/station/orbit/validation code
+  used by the app. Gemini can call up to six iterations of declared tools.
+  Returned tool steps are visible in the UI. Without a Gemini key, an offline
+  keyword router uses those tools instead.
+
+Beacon:
+  ESP32 polls /api/beacon at its configured interval, then drives LEDs, an
+  optional servo dial, OLED and buzzer from the risk level and nearby-fire
+  counts. With an enabled DHT sensor it POSTs temperature/humidity to
+  /api/stations/{id}. The backend optionally checks X-Station-Token when a
+  server token is configured.
+
+7. DEPLOYMENT AND RUNTIME
+-------------------------
+The documented server deployment is one Ubuntu 24.04 host. setup_vultr.sh
+installs Python dependencies, configures a system user and starts one Uvicorn
+worker under systemd on 127.0.0.1:8000. Caddy reverse-proxies the app and
+manages HTTPS. The one-worker setup is deliberate: caches and the prediction
+ledger are process-local.
+
+Developer startup is documented as:
+  python -m venv .venv
+  pip install -r requirements.txt
+  uvicorn backend.main:app --reload
+
+Runtime configuration is environment-based, optionally loaded from a local
+.env. Names documented by the project include:
+  FIRMS_MAP_KEY, GEMINI_API_KEY, GEMINI_MODEL, ELEVENLABS_API_KEY,
+  ELEVENLABS_VOICE_ID, DATABASE_URL, STATION_TOKEN,
+  PYROWATCH_RECORD_LEDGER, PYROWATCH_DATA_MODE, PYROWATCH_GRID_STEP,
+  PYROWATCH_HTTP_TIMEOUT.
+
+The Python dependency manifest specifies minimum versions (not an exact lock):
+  fastapi >=0.110; uvicorn[standard] >=0.29; httpx >=0.27;
+  python-dotenv >=1.0; numpy >=1.26; scikit-learn >=1.4;
+  joblib >=1.3; psycopg[binary] >=3.1; sgp4 >=2.22.
+The browser is vanilla JavaScript/CSS/HTML with vendored Leaflet and
+satellite.js. The device is an Arduino/ESP32 sketch with external Arduino
+libraries. No frontend package manifest or automated test directory was
+identified in the project file inventory.
+
+8. OBSERVATIONS AND IMPROVEMENT PRIORITIES
+------------------------------------------
+Priority 1 — Protect the meaning of fire-risk outputs.
+  Evidence: risk.py explicitly distinguishes the relative weighted index from
+  ml_prob; validation can use a hindcast, and FIRMS observations are hotspots
+  rather than confirmed ignition records. Keep these distinctions prominent
+  in every interface and export. Before operational use, evaluate across more
+  independent fire seasons and regions, measure probability calibration as
+  well as ranking, and publish data cut-off, forecast-vs-observed inputs, and
+  uncertainty/freshness with each result. Do not frame the app as a dispatch
+  or evacuation decision system without domain validation and oversight.
+
+Priority 2 — Make production data quality explicit and enforceable.
+  Evidence: "auto" mode can substitute synthetic data independently per
+  source; source modes are returned and displayed, while "live" mode is
+  available for strict operation. For a public operational deployment, use a
+  production profile that fails closed on required sources, defines minimum
+  freshness, emits source-specific health/latency metrics, and prevents a
+  downstream user/device from treating demo or stale data as live.
+
+Priority 3 — Persist and recover station state consistently.
+  Evidence: ground.py keeps the current station registry and its API history
+  in memory; store.py writes readings to the optional database but does not
+  reconstruct the station registry/history from it. Persist station metadata
+  and query the latest reading/history from the database, or document clearly
+  that stations disappear after a restart. Add retention limits for stored
+  time-series data.
+
+Priority 4 — Replace fire-and-forget database writes with managed work.
+  Evidence: store.py shares one connection and serializes database access;
+  in_background starts daemon threads for writes. A bounded worker/queue or
+  database connection pool, explicit retry/dead-letter behavior and graceful
+  shutdown would prevent dropped writes and make load behavior predictable.
+
+Priority 5 — Reduce cold-start latency and make compute costs visible.
+  Evidence: risk.py computes features for every grid cell on API demand; a
+  cold calculation can request weather/elevation data for many locations.
+  sources.py caches in memory and on disk, but the memory cache is per process.
+  Warm common forecast data, precompute on a scheduled cadence, expose
+  calculation/source latency, and consider shared cache only if multi-worker
+  or multi-instance deployment becomes necessary.
+
+Priority 6 — Add repeatable automated verification.
+  Evidence: scripts/check_presets.py is a manual replay/validation utility, but
+  no automated test directory or CI configuration appeared in the inspected
+  file inventory. Add unit tests for feature scoring, grid boundaries,
+  validation rules, date handling and device payloads; add API contract tests
+  for demo/live/error behavior and regression fixtures for replay presets.
+  Pin or lock production dependencies and test upgrades in CI.
+
+Priority 7 — Harden the device-to-server boundary before wider deployment.
+  Evidence: STATION_TOKEN is optional in config.py, and the ESP32 sketch calls
+  WiFiClientSecure.setInsecure(), disabling server certificate verification
+  for HTTPS. Require authentication in deployed environments, use unique
+  revocable device credentials rather than one fleet-wide secret, validate
+  server certificates, and apply rate/size limits to station ingestion.
+
+Priority 8 — Split the largest UI and route composition modules as features grow.
+  Evidence: frontend/app.js is a 702-line global state/rendering/controller
+  file; backend/main.py owns many unrelated HTTP surfaces. Extract browser
+  map/data/replay/agent/device modules and FastAPI routers around existing
+  domains while retaining a shared typed API contract. This is a maintainability
+  step, not a prerequisite for the current single-process deployment.
+
+Specific configuration/data note:
+  firmware/pyrowatch_beacon/config.example.h contains an example station
+  location at approximately 43.0008, -78.7890, outside the backend's California
+  map grid. The backend accepts and stores out-of-California station readings,
+  but assigns them no California cell, so they will not appear as readings
+  for a risk cell. Replace the sample coordinates with the device's actual
+  California location for an in-scope deployment, or explicitly support
+  out-of-region station mapping if that is intended.
+
+9. KNOWN LIMITS OF THIS DESCRIPTION
+-----------------------------------
+This is a source-based architecture snapshot, not an operational audit. It
+does not validate live provider credentials, deployment health, satellite
+data quality, sensor calibration, or model performance independently. The
+optional local .env was intentionally not read. No code changes beyond the
+repository fast-forward were made for this report.
