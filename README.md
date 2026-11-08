@@ -49,14 +49,19 @@ started over the next three days. Reproduce with `python scripts/check_presets.p
   factor breakdown and preparedness suggestions; these are screening indices, not probabilities
   or official warnings. Existing wildfire scores remain the default and `/api/beacon` wildfire
   fields remain unchanged.
-- **Ask PyroWatch.** Type a town to jump to it, or ask a question. A Gemini agent answers by calling
-  eight of PyroWatch's own tools (area lookup, comparisons, fires nearby, satellite passes,
-  validation, ground stations), and lists every call above its answer.
-- **Plain-language briefings** written by Gemini for each area, optionally read aloud (ElevenLabs).
+- **Four views.** Overview (the hazard map), Space Intelligence (the fire-watch satellites and
+  their passes), Analytics & Validation (replay and hit rates) and AI Intelligence.
+- **Ask PyroWatch.** Ask a question on the AI Intelligence page or about one area. A Gemini agent
+  answers by calling eight of PyroWatch's own tools (area lookup, comparisons, fires nearby,
+  satellite passes, validation, ground stations), and lists every call above its answer.
+- **Spoken answers and briefings.** Gemini writes a plain-language briefing for each area, and
+  ElevenLabs reads briefings and agent answers aloud. Each clip is saved, so replaying it costs no
+  credits.
+- **Risk history in Tiger Data.** Every refresh is stored as a time series (TimescaleDB), so each
+  area shows its last two weeks.
 - **PyroWatch Beacon.** An ESP32 that watches one town: a servo dial shows its risk, a buzzer sounds
   when risk spikes or satellites spot fire nearby, and its temperature and humidity sensor reports
   back to the map as a ground station.
-- **Guided tour.** First-time visitors get a one-minute tour; `?tour=1` loops it for an expo screen.
 
 ## How it works
 
@@ -207,8 +212,9 @@ backend/
   ground.py    ground-station readings from beacons
   store.py     Tiger Data / PostgreSQL time series (optional)
   geo.py, demo.py   California grid and place names; synthetic data for offline mode
-frontend/      index.html, app.js (Leaflet, satellite.js), style.css
-scripts/       check_presets, train_model, build_fire_history, fetch_vegetation, check_gemini, capture_screenshots
+frontend/      index.html, hazards.js, app/ (ES modules: map, panel, space, analytics, ai views; Leaflet, satellite.js)
+scripts/       check_presets, train_model, build_fire_history, fetch_vegetation, check_gemini, check_elevenlabs,
+             backfill_tiger_history, capture_screenshots (for the first version of the interface)
 firmware/      PyroWatch Beacon: ESP32 sketch and wiring guide
 deploy/        server setup script, systemd unit, Caddyfile
 data/          fire history, vegetation, trained model, recorded predictions, preset results
