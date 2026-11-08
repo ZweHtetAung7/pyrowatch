@@ -6,6 +6,7 @@ One-time setup (downloads a ~150 MB browser):
 
 Then, with the app running on live data in another terminal (keys in .env):
   python scripts/capture_screenshots.py
+  python scripts/capture_screenshots.py --only replay      # retake some shots, keep the rest
 
 Writes screenshots/01-...png at 2x resolution plus screenshots/CAPTIONS.md with a caption for each,
 ready for the Devpost gallery. It warns if any data badge says "demo": don't submit those.
@@ -19,6 +20,7 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_Q = "Where is fire risk highest right now, and when does a satellite next pass over it?"
+STEPS = ("overview", "breakdown", "briefing", "agent", "satellites", "replay", "ground", "phone")
 
 
 def main():
@@ -29,7 +31,13 @@ def main():
     ap.add_argument("--replay-date", default="2025-01-06")
     ap.add_argument("--replay-area", default="25 km N of Malibu", help="area to open in the replay shot")
     ap.add_argument("--chromium", help="path to a Chromium binary (optional)")
+    ap.add_argument("--only", help=f"comma-separated shots to retake: {', '.join(STEPS)}")
     args = ap.parse_args()
+    only = set(args.only.split(",")) if args.only else set(STEPS)
+    if only - set(STEPS):
+        ap.error(f"unknown shot(s) {', '.join(sorted(only - set(STEPS)))}; choose from {', '.join(STEPS)}")
+    if "briefing" in only:
+        only.add("breakdown")  # the briefing shot scrolls the panel that the breakdown shot opens
 
     out = ROOT / args.out
     out.mkdir(exist_ok=True)
@@ -55,6 +63,8 @@ def main():
             timeout=90000)
 
     def step(name, fn):
+        if name not in only:
+            return
         try:
             fn()
         except Exception as exc:  # noqa: BLE001 - keep going, report at the end
@@ -91,7 +101,7 @@ def main():
             shot(page, "02-why-this-score",
                  f"Click any area ({top['name']} here): its score broken down factor by factor"
                  + (", plus the trained model's 7-day fire probability." if ml else "."))
-        step("area breakdown", breakdown)
+        step("breakdown", breakdown)
 
         def briefing():
             page.evaluate("() => document.querySelector('#briefing').previousElementSibling.scrollIntoView({block: 'start'})")
@@ -107,6 +117,7 @@ def main():
             page.press("#omni-q", "Enter")
             page.wait_for_selector("#g-answer .answer-text", timeout=120000)
             page.wait_for_timeout(800)
+            page.evaluate("() => document.activeElement && document.activeElement.blur()")  # no focus ring in the shot
             calls = page.evaluate("() => document.querySelectorAll('#g-answer .trace li').length")
             shot(page, "04-ask-pyrowatch",
                  f"Ask PyroWatch: a Gemini agent answers by calling PyroWatch's own tools "
@@ -179,7 +190,7 @@ def main():
                      "Ground truth: the ESP32 beacon's temperature and humidity reading, shown next to the forecast.")
             else:
                 shot(page, "08-risk-history", "Risk over the past week for one area, stored as time series in Tiger Data.")
-        step("ground station", ground)
+        step("ground", ground)
 
         def phone():
             mobile = browser.new_context(**p.devices["iPhone 13"]).new_page()
@@ -192,9 +203,18 @@ def main():
 
         browser.close()
 
+    # Merge with the captions already there, so retaking some shots (or a failed one) keeps the others.
+    cap_file = out / "CAPTIONS.md"
+    merged = {}
+    if cap_file.exists():
+        for line in cap_file.read_text().splitlines():
+            cols = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cols) == 2 and cols[0].endswith(".png") and (out / cols[0]).exists():
+                merged[cols[0]] = cols[1]
+    merged.update(captions)
     lines = ["# PyroWatch screenshots", "", "| File | Caption |", "| --- | --- |"]
-    lines += [f"| {f} | {c} |" for f, c in captions]
-    (out / "CAPTIONS.md").write_text("\n".join(lines) + "\n")
+    lines += [f"| {f} | {c} |" for f, c in sorted(merged.items())]
+    cap_file.write_text("\n".join(lines) + "\n")
     print(f"\n{len(captions)} screenshots in {args.out}/, captions in {args.out}/CAPTIONS.md")
     if errors:
         print("Page errors:", errors[:3])
