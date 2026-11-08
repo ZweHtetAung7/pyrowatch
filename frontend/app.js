@@ -429,7 +429,7 @@ async function ask(id) {
     if (state.selected === id) renderAnswer(out, a);
   } catch (e) { out.textContent = `Error: ${e.message}`; }
 }
-async function askGlobal(q) {
+async function askGlobal(q, cached = null) {
   state.selected = null; highlight();
   const panel = $('#panel');
   panel.hidden = false;
@@ -443,7 +443,9 @@ async function askGlobal(q) {
   $('.close', panel).onclick = closePanel;
   $('h2', panel).focus({ preventScroll: true });
   try {
-    renderAnswer($('#g-answer'), await askApi(q, null));
+    const a = cached || await askApi(q, null);
+    state.lastAnswer = a;
+    renderAnswer($('#g-answer'), a);
   } catch (e) { $('#g-answer').textContent = `Error: ${e.message}`; }
 }
 let audio;
@@ -624,7 +626,7 @@ function setMode(replay) {
   $('#replay-controls').hidden = !replay;
   state.asOf = replay ? ($('#replay-date').value || state.config.replay_presets[0].date) : null;
   if (replay) $('#replay-date').value = state.asOf;
-  loadData();
+  return loadData();
 }
 function initControls() {
   const presets = state.config.replay_presets;
@@ -672,6 +674,100 @@ function initControls() {
     if (hit) { selectCell(hit, { focus: true }); $('#omni-q').value = ''; } else askGlobal(q);
   };
   initKeyboard();
+  $('#about-btn').onclick = showIntro;
+  $('#intro-close').onclick = hideIntro;
+  $('#intro-tour').onclick = () => startTour();
+  $('#tour-stop').onclick = stopTour;
+}
+
+// ------------------------------------------------------------------ intro card + guided tour
+// The intro shows once per browser (not under automation, so screenshot runs stay clean).
+// The tour steps through every feature hands-free; ?tour=1 loops it for an expo screen and
+// reuses the first agent answer so a looping kiosk doesn't spend Gemini quota.
+const tour = { running: false, run: 0, loop: false, answer: null };
+const TOUR_QUESTION = 'Where is fire risk highest right now, and when does a satellite next pass over it?';
+function maybeShowIntro() {
+  let seen = false;
+  try { seen = localStorage.getItem('pw-intro-seen') === '1'; } catch (_) { /* storage blocked */ }
+  if (!seen && !navigator.webdriver) showIntro();
+}
+function showIntro() { $('#intro').hidden = false; $('#intro-tour').focus(); }
+function hideIntro() {
+  $('#intro').hidden = true;
+  try { localStorage.setItem('pw-intro-seen', '1'); } catch (_) { /* storage blocked */ }
+}
+const tourWait = (ms, run) => new Promise((resolve, reject) => {
+  setTimeout(() => (tour.running && tour.run === run ? resolve() : reject(new Error('stopped'))), ms);
+});
+async function tourUntil(test, run, timeout = 30000) {
+  const t0 = Date.now();
+  while (!test() && Date.now() - t0 < timeout) await tourWait(250, run);
+}
+function tourInterrupt(e) { if (!e.target.closest('#tourbar')) stopTour(); }
+function stopTour() {
+  if (!tour.running) return;
+  tour.running = false;
+  tour.run++;
+  $('#tourbar').hidden = true;
+  document.removeEventListener('pointerdown', tourInterrupt, true);
+}
+async function startTour({ loop = false } = {}) {
+  hideIntro();
+  stopTour();
+  tour.running = true;
+  tour.loop = loop;
+  const run = ++tour.run;
+  $('#tourbar').hidden = false;
+  document.addEventListener('pointerdown', tourInterrupt, true);
+  const preset = state.config.replay_presets[0];
+  const steps = [
+    ['Live wildfire risk for every 50 km area of California, for the next 48 hours.', async () => {
+      if (state.asOf) await setMode(false);
+      closePanel(); layers.validation.clearLayers(); go([37.25, -119.3], 6);
+    }, 6000],
+    ['Every score shows its work: how many points each factor adds.', async () => {
+      selectCell(state.risk.top[0].id);
+    }, 8000],
+    ['Gemini writes a plain-language briefing, and PyroWatch predicts the next satellite pass.', async () => {
+      await tourUntil(() => !$('#briefing')?.classList.contains('loading'), run, 20000);
+      $('#briefing')?.previousElementSibling?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+    }, 8000],
+    ["Ask anything: Gemini answers by calling PyroWatch's own tools, listed above the answer.", async () => {
+      await askGlobal(TOUR_QUESTION, tour.answer);
+      if (!tour.answer && state.lastAnswer?.engine !== 'error') tour.answer = state.lastAnswer;
+    }, 9000],
+    ['The five satellites that detect fires, tracked live in orbit.', async () => {
+      closePanel();
+      const s = state.sats.filter((x) => x.pos).sort((a, b) =>
+        Math.abs(a.pos.lat - 37) + Math.abs(a.pos.lon + 119) - Math.abs(b.pos.lat - 37) - Math.abs(b.pos.lon + 119))[0];
+      if (s) go([s.pos.lat, s.pos.lon], 3);
+    }, 7000],
+    [`Replay: the map as it stood on ${fmtLong(preset.date)}, the day before the fires started.`, async () => {
+      go([35.6, -119.3], 7);
+      $('#replay-date').value = preset.date;
+      $('#preset').value = preset.date;
+      await setMode(true);
+      const c = state.risk.cells.find((x) => x.name === '25 km N of Malibu') || state.risk.top[0];
+      selectCell(c.id);
+    }, 9000],
+    ['What actually burned next, and how well PyroWatch called it.', async () => {
+      await reveal();
+      await tourUntil(() => !!document.querySelector('.v-claim'), run, 30000);
+    }, 11000],
+  ];
+  try {
+    do {
+      for (let i = 0; i < steps.length; i++) {
+        const [text, act, ms] = steps[i];
+        $('#tour-step').textContent = `${i + 1}/${steps.length}`;
+        $('#tour-text').textContent = text;
+        announce(text);
+        try { await act(); } catch (e) { if (e.message === 'stopped') throw e; }
+        await tourWait(ms, run);
+      }
+    } while (tour.loop);
+    stopTour();
+  } catch (_) { /* stopped by the user */ }
 }
 function applyPalette() {
   const stops = PALETTES[palette].stops;
@@ -715,7 +811,12 @@ function initKeyboard() {
   const moves = { ArrowUp: [1, 0], ArrowDown: [-1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
   document.addEventListener('keydown', (e) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
-    if (e.key === 'Escape') { if (typing) document.activeElement.blur(); else closePanel(); return; }
+    if (e.key === 'Escape') {
+      if (tour.running) { stopTour(); return; }
+      if (!$('#intro').hidden) { hideIntro(); return; }
+      if (typing) document.activeElement.blur(); else closePanel();
+      return;
+    }
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === '/') { e.preventDefault(); $('#omni-q').focus(); return; }
     if (e.key === '+' || e.key === '=') { map.zoomIn(); return; }
@@ -776,4 +877,6 @@ function stationBlock(c) {
   pollStations();
   setInterval(pollStations, 20000);
   await loadData();
+  if (new URLSearchParams(location.search).get('tour') === '1') startTour({ loop: true });
+  else maybeShowIntro();
 })();

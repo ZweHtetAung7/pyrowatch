@@ -203,6 +203,23 @@ kbd { font: 10.5px var(--mono); border: 1px solid var(--line); border-bottom-wid
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 
+/* ---------- intro card + guided tour ---------- */
+.icon-btn { position: absolute; top: 12px; right: 12px; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04); color: var(--muted); font-weight: 700; line-height: 1; }
+.icon-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+.brand { padding-right: 30px; }
+.intro { position: fixed; inset: 0; z-index: 1900; display: grid; place-items: center; padding: 16px;
+  background: rgba(5, 8, 12, 0.62); backdrop-filter: blur(3px); }
+.intro-card { max-width: 560px; background: var(--panel-solid); border: 1px solid var(--line); border-radius: 18px;
+  box-shadow: var(--shadow); padding: 26px 28px; }
+.intro-card h2 { margin: 6px 0 14px; font-size: 22px; line-height: 1.25; }
+.intro-steps { margin: 0 0 18px; padding-left: 20px; display: grid; gap: 10px; color: var(--muted); }
+.intro-steps b { color: var(--text); }
+#tourbar { left: 50%; transform: translateX(-50%); bottom: 92px; display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px 10px 16px; max-width: min(760px, calc(100vw - 32px)); z-index: 1200; }
+#tour-step { font: 600 12px var(--mono); color: var(--ember-2); white-space: nowrap; }
+#tour-text { font-size: 14px; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1180px) {
   #stats { left: auto; right: 14px; top: auto; bottom: 76px; }
@@ -222,6 +239,7 @@ kbd { font: 10.5px var(--mono); border: 1px solid var(--line); border-bottom-wid
   #stats { bottom: calc(10px + env(safe-area-inset-bottom, 0px) + 9.5rem); }
   .stat { min-width: 105px; padding: 8px 12px; }
   #ticker { display: none; }
+  #tourbar { bottom: 140px; }
   .leaflet-bottom.leaflet-right .leaflet-control-zoom { margin-bottom: 10px; }
   #panel { left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 72vh; border-radius: 18px 18px 0 0; z-index: 1500; padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
   #toast { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
