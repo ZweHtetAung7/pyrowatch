@@ -8,4 +8,5 @@
 | 04-ask-pyrowatch.png | Ask PyroWatch: a Gemini agent answers by calling PyroWatch's own tools (2 calls here), listed above the answer. |
 | 05-fire-watch-satellites.png | The five satellites that detect fires (NOAA-20, NOAA-21, Suomi NPP, Aqua, Terra), tracked live with their ground tracks and sensor footprints. |
 | 06-replay-day-before.png | Replay: the map as it stood on 2025-01-06, using only data available that day. 25 km N of Malibu ranked #1 of 186. |
+| 07-what-happened-next.png | Reveal: the fires satellites saw over the next 3 days. 2 of 3 significant new fires (67%) started in areas already in our top 20% before any satellite saw them. |
 | 09-phone.png | Works on a phone: tap an area and its details slide up from the bottom. |
