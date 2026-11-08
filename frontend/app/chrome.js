@@ -4,7 +4,7 @@ import { state } from './store.js';
 import { $, $$, esc, fmtDate, fmtLong, fmtTime } from './util.js';
 import { HAZARDS } from '../hazards.js';
 import { palette } from './palette.js';
-import { map, go, setLayerVisible } from './map.js';
+import { map, go, setLayerVisible, riskLayer } from './map.js';
 import { loadData, setHazard, applyRisk, sources, freshLabel } from './data.js';
 import { setView, refreshView } from './ui.js';
 import { revealAndValidate } from './analytics.js';
@@ -91,7 +91,8 @@ function renderLegend() {
     <div class="legend-head"><b>${esc(info.mapLabel)}</b><span>next 48 h</span></div>
     <div class="scale" style="background:${palette.gradient()}"></div>
     <div class="scale-labels"><span>Low</span><span>Moderate</span><span>High</span><span>Extreme</span></div>
-    <button class="link-btn" id="palette-btn">Colors: ${esc(palette.label())} ⇄</button>`;
+    <div class="legend-links"><button class="link-btn" id="view-btn">View: ${riskLayer.smooth ? 'smooth' : 'grid'} ⇄</button><button class="link-btn" id="palette-btn">Colors: ${esc(palette.label())} ⇄</button></div>`;
+  $('#view-btn').onclick = () => { riskLayer.setSmooth(!riskLayer.smooth); renderLegend(); };
   $('#palette-btn').onclick = () => { palette.toggle(); if (state.risk) applyRisk(); renderLegend(); refreshView(); };
 }
 

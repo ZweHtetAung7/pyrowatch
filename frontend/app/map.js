@@ -2,8 +2,8 @@
    The risk grid is a single canvas that draws only the visible cells and hit-tests in O(1),
    so it stays fast as the grid grows to the whole US. */
 import { state } from './store.js';
-import { riskColor } from './palette.js';
-import { esc, fmtUtc, fmtReading, ago, rafThrottle, reduceMotion } from './util.js';
+import { riskColor, rgbAt } from './palette.js';
+import { esc, fmtUtc, fmtReading, ago, rafThrottle, reduceMotion, readPref, savePref } from './util.js';
 import { HAZARDS } from '../hazards.js';
 
 const ID_RE = /^r(\d+)c(\d+)$/;
@@ -30,6 +30,41 @@ const RiskLayer = L.Layer.extend({
     this._items = new Map(); this._byId = new Map();
     this._grid = null; this._hover = null; this._sel = null;
     this._rows = [0, -1]; this._cols = [0, -1];
+    this.smooth = readPref('pw-view', (v) => v === 'smooth' || v === 'grid', 'smooth') === 'smooth';
+    this._surf = null;
+  },
+  setSmooth(on) { this.smooth = on; savePref('pw-view', on ? 'smooth' : 'grid'); this.draw(); },
+  // Smooth view: blend each area's score with its neighbours (bilinear between area centres) into a
+  // small image laid out in Web Mercator rows, so it lines up exactly when stretched over the grid.
+  _buildSurface() {
+    const g = this._grid, [r0, r1] = this._rows, [c0, c1] = this._cols;
+    this._surf = null;
+    if (!g || r1 < r0 || c1 < c0) return;
+    const rad = Math.PI / 180, merc = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * rad) / 2));
+    const lonW = g.west + c0 * g.step, lonE = g.west + (c1 + 1) * g.step;
+    const latS = g.south + r0 * g.step, latN = g.south + (r1 + 1) * g.step;
+    const yN = merc(latN), yS = merc(latS);
+    const W = (c1 - c0 + 1) * 12, H = Math.max(1, Math.round((W * (yN - yS)) / ((lonE - lonW) * rad)));
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    const ctx = cv.getContext('2d'), img = ctx.createImageData(W, H), px = img.data;
+    const score = (r, c) => { const it = this._items.get(key(r, c)); return it && it.score != null ? it.score : null; };
+    for (let j = 0; j < H; j++) {
+      const lat = (2 * Math.atan(Math.exp(yN - ((j + 0.5) / H) * (yN - yS))) - Math.PI / 2) / rad;
+      const fr = (lat - g.south) / g.step - 0.5, r = Math.floor(fr), ty = fr - r;
+      for (let i = 0; i < W; i++) {
+        const fc = (lonW + ((i + 0.5) / W) * (lonE - lonW) - g.west) / g.step - 0.5, c = Math.floor(fc), tx = fc - c;
+        let sum = 0, wsum = 0;
+        for (const [dr, dc, w] of [[0, 0, (1 - ty) * (1 - tx)], [0, 1, (1 - ty) * tx], [1, 0, ty * (1 - tx)], [1, 1, ty * tx]]) {
+          const v = score(r + dr, c + dc);
+          if (v != null && w > 0) { sum += v * w; wsum += w; }
+        }
+        if (!wsum) continue;   // no scored area nearby: transparent (the clip hides it anyway)
+        const v = sum / wsum, [cr, cg, cb] = rgbAt(v), k = (j * W + i) * 4;
+        px[k] = cr; px[k + 1] = cg; px[k + 2] = cb; px[k + 3] = Math.round(255 * (0.5 + 0.35 * (v / 100)));
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    this._surf = { cv, latN, latS, lonW, lonE };
   },
   getEvents() { return { moveend: this._reset, zoomend: this._reset, resize: this._reset, zoomstart: this._hide }; },
   onAdd(m) {
@@ -67,6 +102,7 @@ const RiskLayer = L.Layer.extend({
       r0 = Math.min(r0, r); r1 = Math.max(r1, r); c0 = Math.min(c0, c); c1 = Math.max(c1, c);
     }
     this._rows = [r0, r1]; this._cols = [c0, c1];
+    this._buildSurface();
     this.draw();
   },
   setSelected(id) { this._sel = id; this.draw(); },
@@ -102,10 +138,28 @@ const RiskLayer = L.Layer.extend({
     for (let c = cA; c <= cB + 1; c++) xs.push(m.latLngToLayerPoint([g.south, g.west + c * g.step]).x - o.x);
     for (let r = rA; r <= rB + 1; r++) ys.push(m.latLngToLayerPoint([g.south + r * g.step, g.west]).y - o.y);
 
+    const sf = this.smooth && this._surf;
+    if (sf) {
+      // Clip to the areas' squares so the blend keeps the grid's outline, then stretch the surface over it.
+      ctx.save();
+      ctx.beginPath();
+      for (let r = rA; r <= rB; r++) {
+        for (let c = cA; c <= cB; c++) {
+          if (!this._items.has(key(r, c))) continue;
+          const x = xs[c - cA], y = ys[r - rA + 1];
+          ctx.rect(x, y, xs[c - cA + 1] - x, ys[r - rA] - y);
+        }
+      }
+      ctx.clip();
+      const nw = m.latLngToLayerPoint([sf.latN, sf.lonW]).subtract(o), se = m.latLngToLayerPoint([sf.latS, sf.lonE]).subtract(o);
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(sf.cv, nw.x, nw.y, se.x - nw.x, se.y - nw.y);
+      ctx.restore();
+    }
     for (let r = rA; r <= rB; r++) {
       for (let c = cA; c <= cB; c++) {
         const it = this._items.get(key(r, c));
-        if (!it) continue;
+        if (!it || (sf && it.score != null)) continue;   // smooth view: only unscored areas are drawn as squares
         const x = xs[c - cA], y = ys[r - rA + 1];
         ctx.globalAlpha = it.alpha;
         ctx.fillStyle = it.fill;
