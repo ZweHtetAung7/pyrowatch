@@ -1,103 +1,68 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>PyroWatch — multi-hazard early warning</title>
-  <meta name="description" content="California hazard outlooks for wildfire, thunderstorms and blizzards, with transparent scores and forecast measurements.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%237fd1ff' stroke-dasharray='3 3'/%3E%3Cpath d='M16 6c3 5 7 7 7 13a7 7 0 0 1-14 0c0-4 2-6 4-8 0 3 1 4 3 5-1-4 0-7 0-10z' fill='%23ff6a2b'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyroWatch</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="app/app.css">
 </head>
 <body>
-  <div id="map" aria-label="Hazard outlook map of California"></div>
+<header class="topbar">
+  <div class="brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c1 3-3 5-3 9a3 3 0 0 0 6 0c0-1-.5-2-1-3 3 1 5 4 5 7a7 7 0 0 1-14 0c0-5 5-7 7-13z"/></svg>
+    <span>PyroWatch</span>
+  </div>
+  <nav class="nav" role="tablist" aria-label="Views">
+    <button role="tab" data-view="overview" class="active" aria-selected="true">Overview</button>
+    <button role="tab" data-view="space" aria-selected="false">Space Intelligence</button>
+    <button role="tab" data-view="analytics" aria-selected="false">Analytics &amp; Validation</button>
+    <button role="tab" data-view="ai" aria-selected="false">AI Intelligence</button>
+  </nav>
+  <div class="data-status" id="data-status">…</div>
+</header>
 
-  <header id="topbar" class="card">
-    <button id="about-btn" class="icon-btn" aria-label="How PyroWatch works" title="How PyroWatch works">?</button>
-    <div class="brand">
-      <svg width="38" height="38" viewBox="0 0 32 32" aria-hidden="true">
-        <ellipse cx="16" cy="16" rx="15" ry="6" fill="none" stroke="#7fd1ff" stroke-opacity=".55" stroke-dasharray="2.5 2.5" transform="rotate(-25 16 16)"/>
-        <path d="M16 5c3 5 7.5 7 7.5 13.3a7.5 7.5 0 0 1-15 0c0-4 2-6.4 4.2-8.4 0 3 1 4.3 3 5.3-1-4 .3-7.2.3-10.2z" fill="#ff6a2b"/>
-        <path d="M16 15c1.6 2.4 3.4 3.6 3.4 6a3.4 3.4 0 0 1-6.8 0c0-1.7.9-2.8 1.9-3.7.1 1.3.6 2 1.5 2.5-.4-1.9 0-3.3 0-4.8z" fill="#ffd27a"/>
-        <circle cx="28.6" cy="10" r="1.6" fill="#7fd1ff"/>
-      </svg>
-      <div>
-        <h1>PyroWatch</h1>
-        <p>Satellite-informed hazard outlooks for California</p>
-      </div>
+<div class="subbar">
+  <div class="crumbs"><b id="view-title">Overview</b><span id="view-sub">Hazard map</span></div>
+  <div class="seg" id="hazards" role="tablist" aria-label="Hazard"></div>
+  <div class="mode">
+    <div id="replay-wrap" hidden>
+      <select id="preset" aria-label="Replay preset"></select>
+      <input type="date" id="replay-date" aria-label="Replay date">
+      <button id="reveal" class="btn" hidden>Reveal what happened</button>
     </div>
-    <div class="tabs" role="tablist" aria-label="Mode">
-      <button id="mode-live" type="button" class="tab active" role="tab" aria-selected="true" aria-controls="replay-controls">Live · next 48 h</button>
-      <button id="mode-replay" type="button" class="tab" role="tab" aria-selected="false" aria-controls="replay-controls">Replay a past fire</button>
-    </div>
-    <div id="replay-controls" role="group" aria-label="Replay date" hidden>
-      <select id="preset" aria-label="Historical fire event"></select>
-      <input id="replay-date" type="date" aria-label="Replay date" min="2002-01-01">
-      <button id="reveal" type="button" class="btn-reveal" hidden>Reveal what happened next ▸</button>
-    </div>
-    <form id="omni" role="search">
-      <label for="omni-q" class="sr-only">Find a town, or ask PyroWatch a question</label>
-      <input id="omni-q" type="text" list="area-list" autocomplete="off" placeholder="Find a town, or ask: “where should crews stage tonight?”">
-      <datalist id="area-list"></datalist>
-      <button class="btn-ghost" aria-label="Go">↵</button>
-    </form>
-    <div id="window-line"></div>
-    <div id="badges"></div>
-  </header>
-
-  <section id="stats" class="card" aria-live="polite"></section>
-
-  <aside id="panel" class="card" hidden aria-label="Details"></aside>
-  <div id="sr-status" class="sr-only" role="status" aria-live="polite"></div>
-
-  <section id="legend" class="card">
-    <div class="scale-wrap">
-      <div class="legend-row"><span class="legend-title">Risk index · next 48 h</span></div>
-      <div class="scale"></div>
-      <div class="scale-labels"><span>0 Low</span><span>20</span><span>40 High</span><span>60</span><span>75 Extreme</span><span>100</span></div>
-      <div class="legend-links"><button id="view-btn" class="link-btn"></button><button id="palette-btn" class="link-btn"></button></div>
-    </div>
-    <label class="hazard-control" for="hazard-select">Show hazard
-      <select id="hazard-select" aria-label="Select map hazard">
-        <option value="wildfire">Wildfire</option>
-        <option value="thunderstorm">Thunderstorm</option>
-        <option value="blizzard">Blizzard</option>
-      </select>
-    </label>
-    <div class="toggles">
-      <button class="toggle on" data-layer="risk" aria-pressed="true"><span class="sw" style="background:#e0533b"></span>Risk</button>
-      <button class="toggle on" data-layer="fires" aria-pressed="true"><span class="sw" style="background:#ff1f1f;box-shadow:0 0 0 1.5px #fff"></span>Fire detections</button>
-      <button class="toggle on" data-layer="sats" aria-pressed="true"><span class="sw" style="background:#7fd1ff;box-shadow:0 0 6px #7fd1ff"></span>Satellites</button>
-      <button class="toggle on" data-layer="stations" aria-pressed="true" hidden><span class="sw" style="background:#5eead4;box-shadow:0 0 6px #5eead4"></span>Ground stations<span class="count"></span></button>
-    </div>
-    <button id="validate" class="btn-primary">Validate: did fires start where we predicted?</button>
-    <div class="keys" aria-hidden="true"><kbd>/</kbd> search or ask · <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> move between areas · <kbd>Esc</kbd> close</div>
-  </section>
-
-  <section id="ticker" class="card" aria-label="Fire-watch satellites"></section>
-
-  <div id="intro" class="intro" hidden role="dialog" aria-modal="true" aria-labelledby="intro-title">
-    <div class="intro-card">
-      <div class="eyebrow">PYROWATCH</div>
-      <h2 id="intro-title">Satellite-informed hazard outlooks for California</h2>
-      <ol class="intro-steps">
-        <li><b>Three hazard outlooks for the next 48 hours.</b> Switch between wildfire, thunderstorm and blizzard scores. Click any area to see the measurements behind its score.</li>
-        <li><b>Live from orbit.</b> Red dots are fires NASA satellites detected; the five fire-watch satellites are tracked live.</li>
-        <li><b>Proof, not promises.</b> Replay a past fire to see what PyroWatch said the day before, then reveal what actually burned.</li>
-      </ol>
-      <div class="row"><button id="intro-tour" class="btn-primary">Take the 1-minute tour</button><button id="intro-close" class="btn-ghost">Explore on my own</button></div>
-      <p class="note">Data: NASA FIRMS, NASA MODIS, Open-Meteo and CelesTrak. Press ? any time to see this again.</p>
+    <div class="seg">
+      <button id="mode-live" class="active">Live</button>
+      <button id="mode-replay">Replay</button>
     </div>
   </div>
-  <div id="tourbar" class="card" hidden role="status" aria-live="polite"><span id="tour-step"></span><span id="tour-text"></span><button id="tour-stop" class="btn-ghost">Stop tour</button></div>
+</div>
 
-  <div id="loading" role="status" aria-live="polite" aria-label="Loading">
-    <div class="loader"><div class="orbit" aria-hidden="true"></div><div id="loading-text">Contacting satellites…</div></div>
+<main class="stage" id="stage">
+  <div id="map"></div>
+  <div class="banner" id="banner" hidden></div>
+  <div class="tools">
+    <button id="zoom-in" aria-label="Zoom in">+</button>
+    <button id="zoom-out" aria-label="Zoom out">−</button>
+    <button id="layers-btn" aria-label="Layers" aria-expanded="false">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 13 9 5 9-5"/></svg>
+    </button>
+    <button id="locate-btn" aria-label="Use my location">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+    </button>
   </div>
-  <div id="toast" hidden role="alert" aria-live="assertive" aria-atomic="true"></div>
+  <div class="layers-menu" id="layers-menu" hidden></div>
+  <div class="legend" id="legend"></div>
+  <aside class="sheet" id="sheet" hidden></aside>
+  <div class="loading" id="loading" hidden><span class="spin"></span><span id="loading-text"></span></div>
+</main>
 
-  <script src="vendor/leaflet/leaflet.js"></script>
-  <script src="vendor/satellite.min.js"></script>
-  <script type="module" src="app.js"></script>
+<footer class="statusbar"><span id="foot-left"></span><span id="foot-mid"></span><span id="foot-right"></span></footer>
+<div id="toast" role="status" hidden></div>
+<div id="sr-status" class="sr" aria-live="polite"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/4.1.4/satellite.min.js"></script>
+<script type="module" src="app/main.js"></script>
 </body>
 </html>

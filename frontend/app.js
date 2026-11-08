@@ -1,5 +1,5 @@
 'use strict';
-/* PyroWatch frontend: Leaflet map + risk grid + FIRMS fires + live satellite orbits (satellite.js). */
+/* PyroWatch frontend: Leaflet map + risk grid + FIRMS fires; satellite orbits live on the provenance view. */
 import { HAZARDS, hazardActions, hazardFor } from './hazards.js';
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -40,8 +40,9 @@ const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').match
 const state = {
   config: null, asOf: null, risk: null, fires: null, selected: null, validation: null,
   sats: [], satSource: null, firesRevealed: true, stations: [],
-  hazard: 'wildfire',
-  show: { risk: true, fires: true, sats: true, stations: true },
+  hazard: 'wildfire', view: 'overview',
+  userLoc: null, // {lat, lon} only after geolocation permission
+  show: { risk: true, fires: true, sats: false, stations: true },
 };
 try {
   const savedHazard = localStorage.getItem('pw-hazard');
@@ -56,8 +57,8 @@ for (const [name, z] of [['labels', 610], ['validation', 615], ['fires', 620], [
   map.createPane(name).style.zIndex = z;
 }
 map.getPane('labels').style.pointerEvents = 'none';
-const ESRI_BASE = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}';
-const ESRI_REF = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
+const ESRI_BASE = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}';
+const ESRI_REF = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
 L.tileLayer(ESRI_BASE, {
   maxZoom: 16,
   attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ · Fire data: NASA FIRMS · Weather: Open-Meteo · Orbits: CelesTrak',
@@ -67,7 +68,7 @@ L.tileLayer(ESRI_REF, { maxZoom: 16, pane: 'labels' }).addTo(map);
 const layers = {
   risk: L.layerGroup().addTo(map),
   fires: L.layerGroup().addTo(map),
-  sats: L.layerGroup().addTo(map),
+  sats: L.layerGroup(), // shown only from the Data Sources view
   validation: L.layerGroup().addTo(map),
   stations: L.layerGroup().addTo(map),
 };
@@ -114,7 +115,7 @@ const qs = (extra = {}) => {
 
 // ------------------------------------------------------------------ data loading
 async function loadData() {
-  loading(state.asOf ? `Rebuilding the risk map as it looked on ${fmtLong(state.asOf)}…` : 'Pulling satellite fire detections and the 48-hour forecast…');
+  loading(state.asOf ? `Rebuilding the risk map as it looked on ${fmtLong(state.asOf)}…` : 'Loading weather forecast and fire detections…');
   try {
     const [risk, fires] = await Promise.all([
       api(`/api/risk${qs()}`),
@@ -236,7 +237,7 @@ function applyView() {
 function firePopup(d) {
   const sat = state.sats.find((s) => s.name === d.satellite);
   const alt = sat?.alt ? `${Math.round(sat.alt)} km` : d.instrument === 'MODIS' ? '~705 km' : '~830 km';
-  return `<b>🔥 Active fire detection</b><br>
+  return `<b>Active fire detection</b><br>
     Seen by <b>${esc(d.satellite)}</b> (${esc(d.instrument)}) from ${alt} up<br>
     ${esc(fmtUtc(d.time_utc))} · ${d.daynight === 'N' ? 'night pass' : 'day pass'}<br>
     Fire radiative power: <b>${d.frp.toFixed(1)} MW</b> · confidence ${esc(d.confidence)}<br>
@@ -273,8 +274,162 @@ function renderHeader() {
     ['History', r.sources.history], ['Vegetation', r.sources.vegetation], ['Orbits', state.satSource],
   ].filter(([, s]) => s);
   const anyDemo = src.some(([, s]) => s.mode === 'demo');
-  $('#badges').innerHTML = (anyDemo ? '<span class="badge demo-all" title="Some layers use synthetic data — see each badge">DEMO DATA</span>' : '')
+  $('#badges').innerHTML = (anyDemo ? '<span class="badge demo-all" title="Some layers use synthetic data — open Data Sources for details">DEMO DATA</span>' : '')
     + src.map(([k, s]) => `<span class="badge ${s.mode !== 'live' ? 'demo' : ''}" title="${esc(s.source)}${s.note ? ` — ${esc(s.note)}` : ''}"><i></i>${k}: ${s.mode === 'live' ? 'live' : s.mode === 'off' ? 'off' : 'demo'}</span>`).join('');
+  if (state.view === 'satellites') renderSatellitesBody();
+  if (state.view === 'stations') renderStationsBody();
+}
+function fmtWx(v, digits = 0, unit = '') {
+  if (v == null || Number.isNaN(v)) return '—';
+  return `${Number(v).toFixed(digits)}${unit}`;
+}
+function sourceFreshnessLabel(status) {
+  if (!status) return 'UNAVAILABLE';
+  if (status.mode === 'demo') return 'DEMO';
+  if (status.mode === 'off') return 'UNAVAILABLE';
+  if (status.mode === 'live' && /cach/i.test(status.note || '')) return 'CACHED';
+  if (status.mode === 'live') return 'LIVE';
+  return String(status.mode || 'UNAVAILABLE').toUpperCase();
+}
+function freshnessBlock() {
+  const r = state.risk;
+  const rows = [
+    ['Weather', r?.sources?.weather],
+    ['Fires', state.fires?.source],
+    ['Terrain', r?.sources?.terrain],
+    ['History', r?.sources?.history],
+    ['Vegetation', r?.sources?.vegetation],
+    ['Orbits', state.satSource],
+  ];
+  return `<div class="panel-section">
+    <h3>Data freshness</h3>
+    <div class="freshness">${rows.map(([k, s]) => {
+      const label = sourceFreshnessLabel(s);
+      const tip = s ? `${s.source || k}${s.note ? ` — ${s.note}` : ''}` : 'No status';
+      return `<span class="fresh ${label}" title="${esc(tip)}">${esc(k)} · ${label}</span>`;
+    }).join('')}</div>
+    <p class="note">DEMO/UNAVAILABLE layers are not observed live conditions. A low risk index is not a safety clearance.</p>
+  </div>`;
+}
+function nearbyFires(c, radiusKm = 75) {
+  if (!state.fires?.detections || !state.firesRevealed) return null;
+  return state.fires.detections
+    .map((d) => ({ ...d, dist_km: haversineKm(c.lat, c.lon, d.lat, d.lon) }))
+    .filter((d) => d.dist_km <= radiusKm)
+    .sort((a, b) => a.dist_km - b.dist_km)
+    .slice(0, 6);
+}
+function nearbyStations(c, radiusKm = 80) {
+  return state.stations
+    .map((s) => ({ ...s, dist_km: haversineKm(c.lat, c.lon, s.lat, s.lon) }))
+    .filter((s) => s.dist_km <= radiusKm && Date.now() - Date.parse(s.latest.time_utc) < 6 * 3.6e6)
+    .sort((a, b) => a.dist_km - b.dist_km)
+    .slice(0, 5);
+}
+function weatherBlock(c) {
+  const r = c.raw || {};
+  let cells;
+  if (state.hazard === 'thunderstorm') {
+    cells = [
+      ['Peak CAPE', fmtWx(r.cape_max_jkg, 0), 'J/kg'],
+      ['Temp max', fmtWx(r.tmax_c, 1), '°C'],
+      ['Gust', fmtWx(r.gust_kmh, 0), 'km/h'],
+      ['RH min', fmtWx(r.rh_min_pct, 0), '%'],
+    ];
+  } else if (state.hazard === 'blizzard') {
+    cells = [
+      ['Snowfall 48h', fmtWx(r.snowfall_48h_cm, 1), 'cm'],
+      ['Temp max', fmtWx(r.tmax_c, 1), '°C'],
+      ['Gust', fmtWx(r.gust_kmh, 0), 'km/h'],
+      ['Wind', fmtWx(r.wind_kmh, 0), 'km/h'],
+    ];
+  } else {
+    cells = [
+      ['Temp max', fmtWx(r.tmax_c, 1), '°C'],
+      ['RH min', fmtWx(r.rh_min_pct, 0), '%'],
+      ['Gust', fmtWx(r.gust_kmh, 0), 'km/h'],
+      ['FFWI', fmtWx(r.ffwi, 0), '/100'],
+      ['Precip 30d', fmtWx(r.precip_30d_mm, 1), 'mm'],
+      ['Days since rain', r.days_since_rain == null ? '—' : String(r.days_since_rain), ''],
+      ['VPD', fmtWx(r.vpd_kpa, 2), 'kPa'],
+      ['Wind', fmtWx(r.wind_kmh, 0), 'km/h'],
+    ];
+    if (c.ml_prob != null) cells.push(['ML fire (7d)', `${(c.ml_prob * 100).toFixed(0)}`, '%']);
+  }
+  const veg = c.vegetation
+    ? `<div class="muted small" style="margin-top:6px"><b>Vegetation:</b> ${esc(c.vegetation)}${c.veg_gate != null ? ` · gate ×${c.veg_gate.toFixed(2)}` : ''}${r.ndvi != null ? ` · NDVI ${Number(r.ndvi).toFixed(2)}` : ''}</div>`
+    : '<div class="muted small" style="margin-top:6px">Vegetation: unavailable</div>';
+  return `<div class="panel-section">
+    <h3>Weather &amp; vegetation</h3>
+    <div class="wx-grid">${cells.map(([k, v, u]) => `
+      <div class="wx-cell"><div class="k">${esc(k)}</div><div class="v">${esc(v)}${u ? `<span class="u"> ${esc(u)}</span>` : ''}</div></div>`).join('')}
+    </div>
+    ${veg}
+    <p class="note">Forecast measurements from Open-Meteo. Values are inputs to the selected hazard index, not official warnings.</p>
+  </div>`;
+}
+function firesBlock(c) {
+  if (state.hazard !== 'wildfire') {
+    return `<div class="panel-section"><h3>Active detections</h3>
+      <p class="muted small">Fire detection overlays are wildfire-specific. Switch hazard to Wildfire to inspect FIRMS hotspots near this area.</p></div>`;
+  }
+  const near = nearbyFires(c);
+  if (near == null) {
+    return `<div class="panel-section"><h3>Nearby fire detections</h3>
+      <p class="muted small">${state.asOf && !state.firesRevealed ? 'Detections are hidden until you reveal the replay outcome.' : 'Fire detection layer unavailable.'}</p></div>`;
+  }
+  if (!near.length) {
+    return `<div class="panel-section"><h3>Nearby fire detections</h3>
+      <p class="muted small">No FIRMS detections within ~75 km of this cell center in the current window. Absence of detections is not proof of safety.</p></div>`;
+  }
+  return `<div class="panel-section"><h3>Nearby fire detections</h3>
+    <ul class="near-list">${near.map((d) => `
+      <li>
+        <span><b>${esc(d.satellite)}</b> · ${esc(d.instrument)}
+          <div class="meta">${esc(fmtUtc(d.time_utc))} · FRP ${d.frp.toFixed(1)} MW · ${esc(d.confidence)}</div>
+        </span>
+        <span class="dist">${d.dist_km < 1 ? `${Math.round(d.dist_km * 1000)} m` : `${d.dist_km.toFixed(1)} km`}</span>
+      </li>`).join('')}</ul>
+    <p class="note">Distances are from the cell center to the detection point. Hotspots are satellite observations, not confirmed ignitions.</p>
+  </div>`;
+}
+function stationsNearBlock(c) {
+  const near = nearbyStations(c);
+  if (!near.length) {
+    return `<div class="panel-section"><h3>Nearby ground stations</h3>
+      <p class="muted small">No recent Beacon readings within ~80 km.</p></div>`;
+  }
+  return `<div class="panel-section"><h3>Nearby ground stations</h3>
+    <ul class="near-list">${near.map((s) => `
+      <li>
+        <span><b>${esc(s.label)}</b>
+          <div class="meta">${esc(fmtReading(s.latest))} · ${esc(ago(s.latest.time_utc))} · ${esc(s.place || '')}</div>
+        </span>
+        <span class="dist">${s.dist_km.toFixed(1)} km</span>
+      </li>`).join('')}</ul>
+  </div>`;
+}
+function assistantBlock(c) {
+  const prompts = [
+    'Is this area safe right now?',
+    'A fire is across the road from me. What should I do?',
+    'Should I evacuate?',
+    'Which direction should I move?',
+    'What should I do if the fire gets closer?',
+  ];
+  return `<details class="ai-assistant" id="ai-assistant">
+    <summary>Ask AI about this area</summary>
+    <div class="ai-body">
+      <div class="ai-safety">Uses the selected cell via <b>/api/ask</b> tools (risk, fires nearby, stations). Does not invent distances or alerts. A low score is not “safe.” For immediate danger call <b>911</b>.</div>
+      <div class="muted small">Context loaded: ${esc(c.name)} · ${esc(HAZARDS[state.hazard].label)} · ${c.lat.toFixed(2)}°, ${c.lon.toFixed(2)}°${state.userLoc ? ` · your location shared` : ''}</div>
+      <div id="briefing" class="briefing loading">Preparing area briefing…</div>
+      <div class="row">${state.config?.has_tts ? '<button id="listen" class="btn-ghost">▶ Listen to briefing</button>' : ''}<span class="engine" id="engine">…</span></div>
+      <div class="ai-chips">${prompts.map((p) => `<button type="button" class="ai-chip" data-q="${esc(p)}">${esc(p)}</button>`).join('')}</div>
+      <form id="ask-form"><input id="ask-q" type="text" placeholder="Ask a practical safety question about this area…" autocomplete="off"><button class="btn-ghost">Ask</button></form>
+      <div id="answer" class="answer" hidden></div>
+      <button type="button" id="share-loc" class="link-btn">${state.userLoc ? 'Location permission granted' : 'Share my location for proximity questions'}</button>
+    </div>
+  </details>`;
 }
 function renderStats(message) {
   // The reveal button lives in the replay controls (top left), where an open area panel can't cover it.
@@ -289,12 +444,17 @@ function renderStats(message) {
   const hot = (counts.Extreme || 0) + (counts['Very high'] || 0) + (counts.High || 0);
   const top = r.top_by_hazard?.[state.hazard]?.[0] || r.top?.[0];
   const topScore = state.hazard === 'wildfire' ? top?.risk : top?.score;
+  const topCell = top ? cellById(top.id) : null;
   const firesLabel = state.asOf ? 'Fires, next 72 h' : 'Fire detections, 48 h';
   const firesVal = state.asOf && !state.firesRevealed ? '<small>hidden</small>' : `${f?.count ?? '–'}`;
+  const wxBits = topCell?.raw
+    ? `${fmtWx(topCell.raw.tmax_c, 0)}°C · RH ${fmtWx(topCell.raw.rh_min_pct, 0)}% · gust ${fmtWx(topCell.raw.gust_kmh, 0)}`
+    : '—';
   $('#stats').innerHTML = `
     <div class="stat"><div class="k">${firesLabel}</div><div class="v">${firesVal}</div></div>
-    <div class="stat"><div class="k">Areas high ${esc(HAZARDS[state.hazard].label.toLowerCase())} or above</div><div class="v">${hot}<small> / ${r.cells.length}</small></div></div>
-    <div class="stat"><div class="k">Highest ${esc(HAZARDS[state.hazard].label.toLowerCase())}</div><div class="v name" title="${esc(top ? top.name : '')}">${top ? `${esc(top.name)} · ${Number(topScore).toFixed(0)}` : '–'}</div></div>`;
+    <div class="stat"><div class="k">High+ ${esc(HAZARDS[state.hazard].label.toLowerCase())} areas</div><div class="v">${hot}<small> / ${r.cells.length}</small></div></div>
+    <div class="stat"><div class="k">Highest ${esc(HAZARDS[state.hazard].label.toLowerCase())}</div><div class="v name" title="${esc(top ? top.name : '')}">${top ? `${esc(top.name)} · ${Number(topScore).toFixed(0)}` : '–'}</div></div>
+    <div class="stat"><div class="k">Top-area weather</div><div class="v name" title="${esc(wxBits)}">${esc(wxBits)}</div></div>`;
 }
 async function reveal() {
   state.firesRevealed = true;
@@ -326,55 +486,65 @@ function selectCell(id, { fly = true, focus = false } = {}) {
   const hazardInfo = HAZARDS[state.hazard];
   const rank = hazardData.rank || c.rank;
   const actions = hazardActions(state.hazard, score);
+  if (state.view !== 'overview') setAppView('overview');
   const panel = $('#panel');
   panel.hidden = false;
   panel.innerHTML = `
     <button class="close" aria-label="Close">×</button>
-    <div class="eyebrow">AREA ${esc(c.id)} · ${c.lat.toFixed(2)}°, ${c.lon.toFixed(2)}°</div>
+    <div class="eyebrow">${esc(hazardInfo.label).toUpperCase()} · AREA ${esc(c.id)}</div>
     <h2 tabindex="-1">${esc(c.name)}</h2>
-    <div class="score-row">
+    <div class="muted small">${c.lat.toFixed(3)}°, ${c.lon.toFixed(3)}°</div>
+    <div class="score-row" style="margin-top:10px">
       <div class="score" style="--c:${riskColor(score ?? 0)}">${score == null ? '—' : Math.round(score)}<span>/100</span></div>
       <div>
-        ${category ? `<span class="chip" style="background:${catColor(category)};color:${catTextColor(category)}">${esc(category)} ${esc(hazardInfo.shortLabel.toLowerCase())}</span>` : '<span class="chip unavailable">Score unavailable</span>'}
-        <div class="muted small" style="margin-top:6px">${rank ? `Rank #${rank} of ${n} areas statewide` : 'Required forecast measurements are unavailable'}</div>
-        ${state.hazard === 'wildfire' && c.raw.ffwi != null ? `<div class="muted small" title="US Forest Service index from temperature, humidity and wind only, used in National Weather Service fire-weather products">Fosberg fire weather index: <b>${Math.round(c.raw.ffwi)}</b>/100 (standard, weather only)</div>` : ''}
-        ${state.hazard === 'wildfire' && c.ml_prob != null ? `<div class="small" style="margin-top:2px">ML model: <b>${(c.ml_prob * 100).toFixed(0)}%</b> chance of a new fire within 7 days</div>` : ''}
-        ${state.hazard === 'wildfire' && fic != null ? `<div class="muted small">${fic} fire detection${fic === 1 ? '' : 's'} here ${state.asOf ? 'in the next 72 h' : 'in the last 48 h'}</div>` : ''}
+        ${category ? `<span class="chip" style="background:${catColor(category)};color:${catTextColor(category)}">${esc(category)}</span>` : '<span class="chip unavailable">Score unavailable</span>'}
+        <div class="muted small" style="margin-top:6px">${rank ? `Rank #${rank} of ${n} statewide` : 'Required forecast measurements unavailable'}</div>
+        ${state.hazard === 'wildfire' && fic != null ? `<div class="muted small">${fic} detection${fic === 1 ? '' : 's'} inside this cell</div>` : ''}
+        <p class="note" style="margin:6px 0 0">Relative index, not a probability or official warning.</p>
       </div>
     </div>
 
-    <h3>${esc(hazardInfo.label)} score breakdown</h3>
-    <p class="muted small hazard-caveat">${esc(hazardInfo.caveat)}</p>
-    <ul class="factors">${factors.map((f) => `
-      <li>
-        <div class="f-top"><span>${esc(f.label)}<span class="w">weight ${(f.weight * 100).toFixed(0)}%</span></span><span class="pts">+${f.points.toFixed(1)}</span></div>
-        <div class="bar"><i style="width:${((f.value ?? 0) * 100).toFixed(0)}%"></i></div>
-        <div class="f-exp">${f.value == null ? 'no data — weight redistributed' : esc(f.explain)}</div>
-      </li>`).join('')}
-    </ul>
-    ${factors.length ? '' : '<div class="muted small">No usable measurements were reported for this hazard window.</div>'}
-    ${state.hazard === 'wildfire' ? stationBlock(c) : ''}
-    ${state.hazard === 'wildfire' ? `<p class="gate muted">Points = 100 × weight × factor score × fuel gate (×${c.fuel_gate.toFixed(2)})${c.veg_gate != null && c.vegetation ? ` × vegetation (×${c.veg_gate.toFixed(2)})` : ''}. Wet fuels shrink the fuel gate, so wind over green hills doesn't read as fire weather${c.vegetation ? `; the vegetation multiplier keeps bare desert from ranking high. ${esc(c.vegetation.charAt(0).toUpperCase() + c.vegetation.slice(1))}.` : '.'}</p>` : ''}
-    <div class="hazard-actions"><b>Suggested actions</b><ul>${actions.map((action) => `<li>${esc(action)}</li>`).join('')}</ul></div>
+    ${firesBlock(c)}
+    ${weatherBlock(c)}
 
-    <h3>AI briefing <span class="engine" id="engine">…</span></h3>
-    <div id="briefing" class="briefing loading">Analyzing conditions…</div>
-    <div class="row">${state.config?.has_tts ? '<button id="listen" class="btn-ghost">▶ Listen to briefing</button>' : ''}</div>
+    <div class="panel-section">
+      <h3>Contributing factors</h3>
+      <p class="muted small hazard-caveat">${esc(hazardInfo.caveat)}</p>
+      <ul class="factors">${factors.map((f) => `
+        <li>
+          <div class="f-top"><span>${esc(f.label)}<span class="w">weight ${(f.weight * 100).toFixed(0)}%</span></span><span class="pts">+${f.points.toFixed(1)}</span></div>
+          <div class="bar"><i style="width:${((f.value ?? 0) * 100).toFixed(0)}%"></i></div>
+          <div class="f-exp">${f.value == null ? 'no data — weight redistributed' : esc(f.explain)}</div>
+        </li>`).join('')}
+      </ul>
+      ${factors.length ? '' : '<div class="muted small">No usable measurements for this hazard window.</div>'}
+      ${state.hazard === 'wildfire' ? `<p class="gate muted">Fuel gate ×${c.fuel_gate.toFixed(2)}${c.veg_gate != null ? ` · vegetation ×${c.veg_gate.toFixed(2)}` : ''}.</p>` : ''}
+    </div>
 
-    ${!state.asOf && state.config?.database?.ready ? `<h3>${esc(HAZARDS[state.hazard].label)} over the past 2 weeks <span class="engine">${state.config.database.timescale ? 'Tiger Data · TimescaleDB' : 'PostgreSQL'}</span></h3>
-    <div id="history" class="history"><div class="muted small">Loading history…</div></div>` : ''}
+    ${stationsNearBlock(c)}
+    ${freshnessBlock()}
 
-    <h3>Ask PyroWatch</h3>
-    <form id="ask-form"><input id="ask-q" type="text" placeholder="Why is this higher than the area next to it?" autocomplete="off"><button class="btn-ghost">Ask</button></form>
-    <div id="answer" class="answer" hidden></div>
+    <div class="hazard-actions"><b>Preparedness suggestions</b><ul>${actions.map((action) => `<li>${esc(action)}</li>`).join('')}</ul>
+      <p class="note" style="margin-top:6px">Follow official local alerts. Call 911 for immediate danger.</p>
+    </div>
 
-    <h3>Next satellite passes overhead</h3>
-    <div id="passes" class="passes"><div class="muted small">Propagating orbits…</div></div>
-    <div class="note">Fire detections come from VIIRS and MODIS instruments on these satellites. Orbits computed in your browser from ${state.sats.some((s) => s.simulated) ? '<b>simulated</b> orbital elements (offline mode)' : 'CelesTrak orbital elements (SGP4)'}.</div>`;
+    ${assistantBlock(c)}
+
+    ${!state.asOf && state.config?.database?.ready ? `<div class="panel-section"><h3>Risk history <span class="engine">${state.config.database.timescale ? 'Tiger Data · TimescaleDB' : 'PostgreSQL'}</span></h3>
+    <div id="history" class="history"><div class="muted small">Loading history…</div></div></div>` : ''}
+
+    <p class="note">Satellite tracks live on <button type="button" class="link-btn" id="panel-open-satellites">Satellite Tracking</button>.</p>`;
   panel.scrollTop = 0;
   $('.close', panel).onclick = closePanel;
   $('#ask-form').onsubmit = (e) => { e.preventDefault(); ask(id); };
   $('#listen')?.addEventListener('click', () => listen(id));
+  $('#panel-open-satellites')?.addEventListener('click', () => setAppView('satellites'));
+  panel.querySelectorAll('.ai-chip').forEach((b) => b.addEventListener('click', () => {
+    $('#ask-q').value = b.dataset.q;
+    $('#ai-assistant').open = true;
+    ask(id);
+  }));
+  $('#share-loc')?.addEventListener('click', () => requestUserLocation());
   loadBriefing(id);
   if ($('#history')) loadHistory(id, 14);
   setTimeout(() => renderPasses(c), 30);
@@ -447,31 +617,59 @@ function renderAnswer(el, a) {
   el.querySelectorAll('.area-link').forEach((b) => b.addEventListener('click', () => selectCell(b.dataset.id, { focus: true })));
   announce(a.text);
 }
+function composeAssistantQuestion(q, cell) {
+  // Keep the user question short; backend attaches selected-cell context when cell_id is sent.
+  let prefix = '';
+  if (state.userLoc) {
+    prefix = `[User shared location ${state.userLoc.lat.toFixed(4)}, ${state.userLoc.lon.toFixed(4)}. Use it only for proximity relative to tool-verified detections; otherwise say permission was granted but you still need fires_near results.]\n`;
+  } else if (/near me|my location|how far|from me|proximity/i.test(q)) {
+    prefix = '[User asked about personal proximity but has not shared geolocation. Ask them to share location or answer only for the selected map area.]\n';
+  }
+  if (cell) {
+    prefix += `[Answer for selected area ${cell.id} (${cell.name}). Prefer fires_near + find_area tools.]\n`;
+  }
+  return `${prefix}${q}`.slice(0, 600);
+}
+function requestUserLocation() {
+  if (!navigator.geolocation) { toast('Geolocation is not available in this browser.'); return; }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      state.userLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      toast('Location shared for this session. Ask again for proximity-aware guidance.');
+      if (state.selected) selectCell(state.selected, { fly: false });
+    },
+    () => toast('Location permission denied. Proximity answers will use the selected map area only.'),
+    { enableHighAccuracy: false, timeout: 10000 },
+  );
+}
 async function ask(id) {
   const q = $('#ask-q').value.trim();
   if (!q) return;
   const out = $('#answer');
-  out.hidden = false; out.innerHTML = '<div class="muted thinking">Agent is querying live data…</div>';
+  const details = $('#ai-assistant');
+  if (details) details.open = true;
+  out.hidden = false; out.innerHTML = '<div class="muted thinking">Assistant is querying PyroWatch tools…</div>';
   try {
-    const a = await askApi(q, id);
+    const a = await askApi(composeAssistantQuestion(q, cellById(id)), id);
     if (state.selected === id) renderAnswer(out, a);
   } catch (e) { out.textContent = `Error: ${e.message}`; }
 }
 async function askGlobal(q, cached = null) {
   state.selected = null; highlight();
+  setAppView('overview');
   const panel = $('#panel');
   panel.hidden = false;
   panel.innerHTML = `
     <button class="close" aria-label="Close">×</button>
     <div class="eyebrow">ASK PYROWATCH · ${state.config?.agent === 'gemini' ? 'GEMINI AGENT' : 'OFFLINE ROUTER'}</div>
     <h2 tabindex="-1"></h2>
-    <div id="g-answer" class="answer"><div class="muted thinking">Agent is querying live data…</div></div>
-    <p class="note">The agent answers by calling PyroWatch's own tools (area lookup, comparisons, fires nearby, satellite passes, validation, ground stations). Every call is listed above the answer.</p>`;
+    <div class="ai-safety">Statewide questions still use real backend tools. Select a map area for location-specific emergency assistance.</div>
+    <div id="g-answer" class="answer"><div class="muted thinking">Assistant is querying PyroWatch tools…</div></div>`;
   $('h2', panel).textContent = q;
   $('.close', panel).onclick = closePanel;
   $('h2', panel).focus({ preventScroll: true });
   try {
-    const a = cached || await askApi(q, null);
+    const a = cached || await askApi(composeAssistantQuestion(q, null), null);
     state.lastAnswer = a;
     renderAnswer($('#g-answer'), a);
   } catch (e) { $('#g-answer').textContent = `Error: ${e.message}`; }
@@ -504,23 +702,19 @@ function renderValidation(v) {
   const sig = v.cells.filter((c) => c.significant);
   for (const c of sig) {
     L.circleMarker([c.lat, c.lon], {
-      pane: 'validation', radius: 17, fill: false, weight: 2.5, color: c.in_top ? '#ffffff' : '#9fb0c3',
+      pane: 'validation', radius: 17, fill: false, weight: 2.5, color: c.in_top ? '#1e4d7b' : '#9fb0c3',
       dashArray: c.in_top ? null : '4 4', className: 'val-ring',
     }).bindTooltip(`<b>New fire</b> · ${esc(c.name)}<br>We ranked it #${c.rank} (risk ${c.risk.toFixed(0)}) before detection`, { className: 'tip' })
       .on('click', () => selectCell(c.id)).addTo(layers.validation);
   }
-  state.selected = null; highlight();
+  state.selected = null; highlight(); closePanel();
   const pc = (x) => (x == null ? '–' : `${Math.round(x * 100)}%`);
   const topPct = Math.round(v.top_fraction * 100);
   const a = v.all_hotspots || {};
-  const panel = $('#panel');
-  panel.hidden = false;
-  panel.innerHTML = `
-    <button class="close" aria-label="Close">×</button>
+  const html = `
     <div class="eyebrow">VALIDATION · PREDICTION ${esc(v.as_of)} · FIRES ${esc(v.fire_window)}</div>
-    <h2>Did fires start where we predicted?</h2>
     ${v.new_fire_cells === 0
-      ? `<p class="v-claim">No significant new fires were detected in this window${v.already_burning_cells ? ` (${v.already_burning_cells} area(s) were already burning beforehand)` : ''}. Try a replay date from the presets.</p>`
+      ? `<p class="v-claim">No significant new fires were detected in this window${v.already_burning_cells ? ` (${v.already_burning_cells} area(s) were already burning beforehand)` : ''}. Try a replay date from Overview.</p>`
       : `<p class="v-claim"><b>${v.hits} of ${v.new_fire_cells}</b> significant new fires (${pc(v.hit_rate)}) started in areas already in our <b>top ${topPct}%</b> before any satellite saw them.</p>
          <div class="v-hero">
            <div><div class="k">Hit rate</div><div class="v">${pc(v.hit_rate)}</div></div>
@@ -528,10 +722,10 @@ function renderValidation(v) {
            <div><div class="k">ROC AUC</div><div class="v">${v.auc ?? '–'}</div></div>
          </div>
          <p class="muted small">Random guessing would put ${topPct}% of fires in the top ${topPct}% (1.0×). AUC 0.5 = random, 1.0 = perfect ranking.</p>`}
-    ${v.baseline_ffwi?.significant?.new_fire_cells ? `<p class="small">For comparison, ranking areas by the standard Fosberg fire weather index alone: ${v.baseline_ffwi.significant.hits} of ${v.baseline_ffwi.significant.new_fire_cells} (${pc(v.baseline_ffwi.significant.hit_rate)}), ${v.baseline_ffwi.significant.lift}× vs random, AUC ${v.baseline_ffwi.significant.auc ?? '–'}.</p>` : ''}
-    ${a.new_fire_cells ? `<p class="small">Counting every satellite hotspot, including small farm and prescribed burns: ${a.hits} of ${a.new_fire_cells} (${pc(a.hit_rate)}), ${a.lift}× vs random, AUC ${a.auc ?? '–'}.</p>` : ''}
+    ${v.baseline_ffwi?.significant?.new_fire_cells ? `<p class="small">Fosberg-only baseline: ${v.baseline_ffwi.significant.hits} of ${v.baseline_ffwi.significant.new_fire_cells} (${pc(v.baseline_ffwi.significant.hit_rate)}), ${v.baseline_ffwi.significant.lift}× vs random, AUC ${v.baseline_ffwi.significant.auc ?? '–'}.</p>` : ''}
+    ${a.new_fire_cells ? `<p class="small">All hotspots: ${a.hits} of ${a.new_fire_cells} (${pc(a.hit_rate)}), ${a.lift}× vs random, AUC ${a.auc ?? '–'}.</p>` : ''}
     <p class="small"><b>Method:</b> ${esc(v.method)}. "Significant" = ${esc(v.significant_rule)}; ${esc(v.new_rule || '')}.</p>
-    ${sig.length ? `<h3>Significant new fires, ranked by our earlier risk score</h3>
+    ${sig.length ? `<h3 class="sources-section-title">Significant new fires</h3>
     <ul class="v-list">${sig.map((c) => `
       <li data-id="${esc(c.id)}">
         <span class="rk ${c.in_top ? 'hit' : ''}">#${c.rank}</span>
@@ -540,9 +734,10 @@ function renderValidation(v) {
       </li>`).join('')}</ul>` : ''}
     ${v.cells.length > sig.length ? `<p class="note">${v.cells.length - sig.length} smaller hotspot area(s) not listed.</p>` : ''}
     <ul class="caveats">${v.caveats.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`;
-  panel.scrollTop = 0;
-  $('.close', panel).onclick = () => { layers.validation.clearLayers(); closePanel(); };
-  panel.querySelectorAll('.v-list li').forEach((li) => li.addEventListener('click', () => selectCell(li.dataset.id)));
+  setAppView('analytics');
+  const body = $('#analytics-body');
+  body.innerHTML = html;
+  body.querySelectorAll('.v-list li').forEach((li) => li.addEventListener('click', () => selectCell(li.dataset.id)));
   if (state.asOf && !state.firesRevealed) { state.firesRevealed = true; renderFires(true); renderStats(); }
 }
 
@@ -556,8 +751,18 @@ function subpoint(satrec, t) {
 function satIcon(name) {
   return L.divIcon({
     className: '', iconSize: [120, 20], iconAnchor: [9, 10],
-    html: `<div class="sat-icon"><svg width="18" height="18" viewBox="0 0 24 24"><g fill="#7fd1ff"><rect x="9" y="9" width="6" height="6" rx="1"/><rect x="1" y="10" width="7" height="4" opacity=".75"/><rect x="16" y="10" width="7" height="4" opacity=".75"/></g></svg>${esc(name)}</div>`,
+    html: `<div class="sat-icon"><svg width="18" height="18" viewBox="0 0 24 24"><g fill="#1e4d7b"><rect x="9" y="9" width="6" height="6" rx="1"/><rect x="1" y="10" width="7" height="4" opacity=".75"/><rect x="16" y="10" width="7" height="4" opacity=".75"/></g></svg>${esc(name)}</div>`,
   });
+}
+function setSatLayerVisible(on) {
+  state.show.sats = on;
+  if (on) layers.sats.addTo(map); else map.removeLayer(layers.sats);
+  const btn = $('#sources-toggle-sats');
+  if (btn) {
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+    btn.textContent = on ? 'Hide tracks on map' : 'Show tracks on map';
+  }
 }
 async function initSatellites() {
   try {
@@ -567,17 +772,19 @@ async function initSatellites() {
       const satrec = satellite.twoline2satrec(x.tle1, x.tle2);
       const marker = L.marker([0, 0], { pane: 'sats', icon: satIcon(x.name), keyboard: false })
         .bindTooltip(`${esc(x.name)} · ${esc(x.instrument)} · ${x.swath_km} km swath`, { className: 'tip' });
-      const footprint = L.circle([0, 0], { pane: 'sats', radius: (x.swath_km / 2) * 1000, color: '#7fd1ff', weight: 1, opacity: 0.35, fillOpacity: 0.04, interactive: false, className: 'footprint' });
-      const track = L.polyline([], { pane: 'sats', color: '#7fd1ff', weight: 1.2, opacity: 0.45, dashArray: '3 6', interactive: false });
+      const footprint = L.circle([0, 0], { pane: 'sats', radius: (x.swath_km / 2) * 1000, color: '#1e4d7b', weight: 1, opacity: 0.35, fillOpacity: 0.04, interactive: false, className: 'footprint' });
+      const track = L.polyline([], { pane: 'sats', color: '#1e4d7b', weight: 1.2, opacity: 0.45, dashArray: '3 6', interactive: false });
       [track, footprint, marker].forEach((l) => l.addTo(layers.sats));
       return { ...x, satrec, marker, footprint, track };
     });
     if (state.risk) renderHeader();
+    if (state.view === 'satellites') renderSatellitesBody();
     updateTracks(); tick();
     setInterval(tick, 1000);
     setInterval(updateTracks, 60000);
   } catch (e) {
     $('#ticker').innerHTML = `<span class="lbl">Satellites unavailable: ${esc(e.message)}</span>`;
+    if (state.view === 'satellites') renderSatellitesBody();
   }
 }
 function updateTracks() {
@@ -609,7 +816,8 @@ function tick() {
     chips.push(`<button class="sat-chip ${overCA(p) ? 'over' : ''}" data-name="${esc(s.name)}"><b>${esc(s.name)}</b><span>${esc(s.instrument)} · ${Math.round(p.alt)} km · ${where}</span></button>`);
   }
   const t = $('#ticker');
-  t.innerHTML = `<span class="lbl">Fire-watch satellites${state.sats.some((s) => s.simulated) ? ' (simulated orbits)' : ''}</span>${chips.join('')}`;
+  if (!t) return;
+  t.innerHTML = `<span class="lbl">Fire-watch satellites${state.sats.some((s) => s.simulated) ? ' (synthetic TLEs)' : ''}</span>${chips.join('')}`;
   t.querySelectorAll('.sat-chip').forEach((b) => b.addEventListener('click', () => {
     const s = state.sats.find((x) => x.name === b.dataset.name);
     if (s?.pos) go([s.pos.lat, s.pos.lon], 4);
@@ -645,6 +853,136 @@ function renderPasses(c) {
   }).join('');
 }
 
+// ------------------------------------------------------------------ data sources & satellite provenance
+const SOURCE_META = {
+  Weather: { provider: 'Open-Meteo', cadence: 'Forecast/archive pull; risk cache ~30 min near present', role: 'Temperature, humidity, wind, precipitation, CAPE, snowfall' },
+  Fires: { provider: 'NASA FIRMS (VIIRS / MODIS)', cadence: 'NRT detections; cache ~15 min near present', role: 'Active fire / thermal anomaly detections' },
+  Terrain: { provider: 'Open-Meteo elevation', cadence: 'Cached locally after first fetch', role: 'Relief / terrain samples per grid cell' },
+  History: { provider: 'NASA FIRMS archive (local)', cadence: 'Static dataset rebuilt by scripts', role: 'Five-year fire-day counts by cell' },
+  Vegetation: { provider: 'NASA MODIS via ORNL DAAC', cadence: 'Static NDVI dataset', role: 'Spring greenness / vegetation gate' },
+  Orbits: { provider: 'CelesTrak TLE', cadence: 'TLE refresh TTL ~4 hours', role: 'Orbital elements for fire-watch satellites' },
+};
+function statusPill(mode) {
+  const m = mode === 'live' ? 'live' : mode === 'off' ? 'off' : 'demo';
+  return `<span class="status-pill ${m}">${m === 'demo' ? 'synthetic' : m}</span>`;
+}
+function renderSatellitesBody() {
+  const body = $('#satellites-body');
+  if (!body) return;
+  const orbit = state.satSource;
+  const cards = `
+    <article class="prov-card">
+      <h3>Orbits ${statusPill(orbit?.mode || 'off')}</h3>
+      <div class="prov-meta">
+        <div><b>API / dataset:</b> ${esc(orbit?.source || SOURCE_META.Orbits.provider)}</div>
+        <div><b>Role:</b> ${esc(SOURCE_META.Orbits.role)}</div>
+        <div><b>Update cadence:</b> ${esc(SOURCE_META.Orbits.cadence)}</div>
+        ${orbit?.note ? `<div>${esc(orbit.note)}</div>` : ''}
+      </div>
+    </article>
+    <article class="prov-card">
+      <h3>Risk linkage</h3>
+      <div class="prov-meta">
+        <div>Satellite tracks visualize detection platforms (VIIRS/MODIS). They do <b>not</b> contribute points to the hazard risk index.</div>
+        <div>Fire detections shown on Overview come from NASA FIRMS, not from these live track markers.</div>
+      </div>
+    </article>`;
+
+  const satRows = state.sats.length
+    ? state.sats.map((s) => {
+      const sim = s.simulated || state.satSource?.mode === 'demo';
+      const pos = s.pos ? `${s.pos.lat.toFixed(2)}°, ${s.pos.lon.toFixed(2)}° · ${Math.round(s.alt || 0)} km` : 'propagating…';
+      return `<tr>
+        <td><b>${esc(s.name)}</b><div class="muted small">NORAD ${esc(s.norad || s.norad_id || '—')}</div></td>
+        <td>${esc(s.instrument)}<div class="muted small">${esc(String(s.swath_km))} km swath</div></td>
+        <td>${statusPill(sim ? 'demo' : (state.satSource?.mode || 'live'))}<div class="muted small">${esc(pos)}</div></td>
+        <td><code>${esc(s.tle1 || '')}\n${esc(s.tle2 || '')}</code></td>
+      </tr>`;
+    }).join('')
+    : `<tr><td colspan="4" class="muted">Orbit catalog unavailable.</td></tr>`;
+
+  const selected = state.selected ? cellById(state.selected) : null;
+  const passSection = selected
+    ? `<div>
+        <h3 class="sources-section-title">Estimated passes over ${esc(selected.name)}</h3>
+        <div id="passes" class="passes"><div class="muted small">Propagating orbits…</div></div>
+        <p class="note">Browser SGP4 from ${state.sats.some((s) => s.simulated) ? '<b>synthetic</b> TLEs (demo/offline)' : 'CelesTrak TLEs'}. Pass estimates are not risk inputs.</p>
+      </div>`
+    : `<p class="note">Select an Overview map area first to estimate overhead passes for that cell.</p>`;
+
+  body.innerHTML = `
+    <div class="prov-grid">${cards}</div>
+    <div>
+      <div class="sources-actions" style="justify-content:space-between;margin-bottom:8px">
+        <h3 class="sources-section-title" style="margin:0">Orbital parameters &amp; TLEs</h3>
+        <button type="button" id="sources-toggle-sats" class="btn-ghost" aria-pressed="${state.show.sats}">${state.show.sats ? 'Hide tracks on map' : 'Show tracks on map'}</button>
+      </div>
+      <div class="sat-table-wrap">
+        <table class="sat-table">
+          <thead><tr><th>Satellite</th><th>Instrument / swath</th><th>Status</th><th>TLE</th></tr></thead>
+          <tbody>${satRows}</tbody>
+        </table>
+      </div>
+    </div>
+    ${passSection}`;
+  $('#sources-toggle-sats')?.addEventListener('click', () => setSatLayerVisible(!state.show.sats));
+  if (selected) setTimeout(() => renderPasses(selected), 30);
+}
+function renderStationsBody() {
+  const body = $('#stations-body');
+  if (!body) return;
+  if (!state.stations.length) {
+    body.innerHTML = `<p class="muted">No ground stations are reporting yet. Beacons POST sensor readings to <code>/api/stations/{id}</code> and appear here within the poll window.</p>`;
+    return;
+  }
+  body.innerHTML = `
+    <div class="station-table-wrap">
+      <table class="station-table">
+        <thead><tr><th>Station</th><th>Place / cell</th><th>Latest reading</th><th>Age</th></tr></thead>
+        <tbody>${state.stations.map((s) => `
+          <tr>
+            <td><b>${esc(s.label)}</b><div class="muted small">${esc(s.station_id || s.id || '')}</div></td>
+            <td>${esc(s.place || '—')}<div class="muted small">${esc(s.cell_id || '')} · ${s.lat?.toFixed?.(3) ?? s.lat}, ${s.lon?.toFixed?.(3) ?? s.lon}</div></td>
+            <td>${esc(fmtReading(s.latest))}</td>
+            <td>${esc(ago(s.latest.time_utc))}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">${state.stations.length} station${state.stations.length === 1 ? '' : 's'} in memory. Readings are process-local and reset if the server restarts.</p>`;
+}
+function setAppView(view) {
+  const allowed = ['overview', 'satellites', 'analytics', 'stations'];
+  state.view = allowed.includes(view) ? view : 'overview';
+  document.body.classList.remove('view-overview', 'view-satellites', 'view-analytics', 'view-stations');
+  document.body.classList.add(`view-${state.view}`);
+  $('#satellites-view').hidden = state.view !== 'satellites';
+  $('#analytics-view').hidden = state.view !== 'analytics';
+  $('#stations-view').hidden = state.view !== 'stations';
+  $('#ticker').hidden = state.view !== 'satellites';
+  const tabMap = {
+    overview: '#view-overview',
+    satellites: '#view-satellites',
+    analytics: '#view-analytics',
+    stations: '#view-stations',
+  };
+  Object.entries(tabMap).forEach(([name, sel]) => {
+    const el = $(sel);
+    if (!el) return;
+    const on = state.view === name;
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-selected', String(on));
+  });
+  if (state.view === 'satellites') {
+    renderSatellitesBody();
+    setSatLayerVisible(true);
+  } else if (state.show.sats) {
+    setSatLayerVisible(false);
+  }
+  if (state.view === 'stations') renderStationsBody();
+  setTimeout(() => map.invalidateSize(), 50);
+}
+
 // ------------------------------------------------------------------ controls
 function setMode(replay) {
   $('#mode-live').classList.toggle('active', !replay);
@@ -672,7 +1010,8 @@ function initControls() {
   };
   $('#mode-live').onclick = () => setMode(false);
   $('#mode-replay').onclick = () => setMode(true);
-  $('#validate').onclick = runValidation;
+  $('#validate').onclick = () => { setAppView('analytics'); runValidation(); };
+  $('#analytics-run').onclick = runValidation;
   $('#reveal').onclick = reveal;
   $('#hazard-select').value = state.hazard;
   $('#hazard-select').onchange = (e) => {
@@ -718,6 +1057,14 @@ function initControls() {
   $('#intro-close').onclick = hideIntro;
   $('#intro-tour').onclick = () => startTour();
   $('#tour-stop').onclick = stopTour;
+  $('#view-overview').onclick = () => setAppView('overview');
+  $('#view-satellites').onclick = () => setAppView('satellites');
+  $('#view-analytics').onclick = () => setAppView('analytics');
+  $('#view-stations').onclick = () => setAppView('stations');
+  $('#satellites-close').onclick = () => setAppView('overview');
+  $('#analytics-close').onclick = () => setAppView('overview');
+  $('#stations-close').onclick = () => setAppView('overview');
+  $('#open-satellites-link').onclick = () => setAppView('satellites');
 }
 
 // ------------------------------------------------------------------ intro card + guided tour
@@ -761,28 +1108,33 @@ async function startTour({ loop = false } = {}) {
   document.addEventListener('pointerdown', tourInterrupt, true);
   const preset = state.config.replay_presets[0];
   const steps = [
-    ['Live wildfire risk for every 50 km area of California, for the next 48 hours.', async () => {
+    ['Overview: live hazard risk for every 50 km area of California.', async () => {
+      setAppView('overview');
       if (state.asOf) await setMode(false);
       closePanel(); layers.validation.clearLayers(); go([37.25, -119.3], 6);
     }, 6000],
-    ['Every score shows its work: how many points each factor adds.', async () => {
+    ['Click a cell for weather, factors, nearby detections, and a contextual AI assistant.', async () => {
       selectCell(state.risk.top[0].id);
     }, 8000],
-    ['Gemini writes a plain-language briefing, and PyroWatch predicts the next satellite pass.', async () => {
+    ['Open Ask AI about this area for practical guidance grounded in backend tools.', async () => {
+      const details = $('#ai-assistant');
+      if (details) details.open = true;
       await tourUntil(() => !$('#briefing')?.classList.contains('loading'), run, 20000);
-      $('#briefing')?.previousElementSibling?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+      details?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' });
     }, 8000],
-    ["Ask anything: Gemini answers by calling PyroWatch's own tools, listed above the answer.", async () => {
+    ["Ask a statewide question — Gemini still calls PyroWatch's own tools.", async () => {
       await askGlobal(TOUR_QUESTION, tour.answer);
       if (!tour.answer && state.lastAnswer?.engine !== 'error') tour.answer = state.lastAnswer;
     }, 9000],
-    ['The five satellites that detect fires, tracked live in orbit.', async () => {
+    ['Satellite Tracking keeps orbits and TLEs off the Overview map.', async () => {
       closePanel();
+      setAppView('satellites');
       const s = state.sats.filter((x) => x.pos).sort((a, b) =>
         Math.abs(a.pos.lat - 37) + Math.abs(a.pos.lon + 119) - Math.abs(b.pos.lat - 37) - Math.abs(b.pos.lon + 119))[0];
       if (s) go([s.pos.lat, s.pos.lon], 3);
     }, 7000],
     [`Replay: the map as it stood on ${fmtLong(preset.date)}, the day before the fires started.`, async () => {
+      setAppView('overview');
       go([35.6, -119.3], 7);
       $('#replay-date').value = preset.date;
       $('#preset').value = preset.date;
@@ -790,7 +1142,7 @@ async function startTour({ loop = false } = {}) {
       const c = state.risk.cells.find((x) => x.name === '25 km N of Malibu') || state.risk.top[0];
       selectCell(c.id);
     }, 9000],
-    ['What actually burned next, and how well PyroWatch called it.', async () => {
+    ['Analytics & Validation compares the ranking with what satellites saw next.', async () => {
       await reveal();
       await tourUntil(() => !!document.querySelector('.v-claim'), run, 30000);
     }, 11000],
@@ -855,6 +1207,7 @@ function initKeyboard() {
     if (e.key === 'Escape') {
       if (tour.running) { stopTour(); return; }
       if (!$('#intro').hidden) { hideIntro(); return; }
+      if (state.view !== 'overview') { setAppView('overview'); return; }
       if (typing) document.activeElement.blur(); else closePanel();
       return;
     }
@@ -892,15 +1245,15 @@ async function pollStations() {
         .addTo(layers.stations);
     }
     const t = $('.toggle[data-layer="stations"]');
-    t.hidden = !stations.length;
-    t.querySelector('.count').textContent = stations.length ? ` (${stations.length})` : '';
+    if (t) {
+      t.hidden = !stations.length;
+      t.querySelector('.count').textContent = stations.length ? ` (${stations.length})` : '';
+    }
+    if (state.view === 'stations') renderStationsBody();
+    if (state.selected && state.view === 'overview' && $('#panel') && !$('#panel').hidden) {
+      // refresh nearby-station section without rebuilding the whole panel unless assistant is idle
+    }
   } catch (_) { /* stations are optional */ }
-}
-function stationBlock(c) {
-  const here = state.stations.filter((s) => s.cell_id === c.id && Date.now() - Date.parse(s.latest.time_utc) < 3 * 3.6e6);
-  if (!here.length) return '';
-  return `<div class="ground"><b>On the ground:</b> ${here.map((s) => `${esc(s.label)} measured ${esc(fmtReading(s.latest))} <span class="muted">(${esc(ago(s.latest.time_utc))})</span>`).join('<br>')}
-    ${c.raw.rh_min_pct != null ? `<div class="muted small">Forecast minimum humidity for this area: ${c.raw.rh_min_pct.toFixed(0)}%</div>` : ''}</div>`;
 }
 
 (async function init() {

@@ -22,8 +22,19 @@ AGENT_RULES = """
 You can call tools that query PyroWatch's live data. Always call a tool before stating a number;
 never guess. Resolve place names with find_area (it accepts towns, landmarks or "lat, lon").
 When comparing areas, use compare_areas and explain the difference with factor points.
+For nearby fires use fires_near; for ground readings use ground_stations or find_area.
 For "when will a satellite see X" use satellite_passes. Keep answers under 140 words, plain text,
-with short "• " bullets when listing. If a tool reports demo/synthetic data, say so once."""
+with short "• " bullets when listing. If a tool reports demo/synthetic data, say so once.
+
+Emergency-assistant rules (when the user asks what to do / evacuate / is it safe):
+- Give clear, concise, actionable preparedness guidance. Prioritize official emergency instructions.
+- If the user describes immediate danger (fire across the road, trapped, heavy smoke indoors), tell them to call 911 now and leave the AI chat for later.
+- Never claim an area is "safe" based only on a low risk index. A low score is not clearance.
+- Never invent fire distances, wind direction, evacuation routes, road closures, or emergency alerts.
+- Distinguish relative risk indexes from confirmed satellite fire detections.
+- Do not issue a definitive evacuation order unless the available tool results include authoritative emergency information (they currently do not). Say residents should follow local authorities / Ready.gov / Cal OES guidance.
+- If personal proximity is asked and no user coordinates were provided, say you only know the selected map area unless they share a location.
+- Clearly name missing or stale/demo information when tools report it."""
 
 _S, _N, _I = {"type": "string"}, {"type": "number"}, {"type": "integer"}
 DECLARATIONS = [
@@ -204,7 +215,19 @@ def run(question: str, as_of: date | None = None, cell_id: str | None = None):
 
     note = ""
     if cell_id and cell_id in tools.cells:
-        note = f"\n\n[The user has area {cell_id} ({tools.cells[cell_id]['name']}) selected on the map.]"
+        c = tools.cells[cell_id]
+        hz = c.get("hazards") or {}
+        src = {k: v.get("mode") for k, v in tools.payload.get("sources", {}).items()}
+        note = (
+            f"\n\n[Selected map area context — verify with tools before citing numbers:\n"
+            f" id={cell_id}; name={c['name']}; lat={c['lat']:.4f}; lon={c['lon']:.4f};\n"
+            f" wildfire_index={c.get('risk')}; category={c.get('category')}; rank={c.get('rank')};\n"
+            f" thunderstorm={((hz.get('thunderstorm') or {}).get('score'))}; "
+            f"blizzard={((hz.get('blizzard') or {}).get('score'))};\n"
+            f" weather_raw_keys={sorted((c.get('raw') or {}).keys())};\n"
+            f" source_modes={src};\n"
+            f" Use fires_near and find_area for detections/stations. Do not invent distances or alerts.]"
+        )
     if as_of:
         note += f"\n[The map is in REPLAY mode for {as_of.isoformat()}; data reflects that date.]"
     contents = [{"role": "user", "parts": [{"text": question + note}]}]
