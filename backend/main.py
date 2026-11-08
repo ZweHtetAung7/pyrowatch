@@ -123,8 +123,10 @@ def get_tts(cell_id: str, as_of: str | None = None, hazard: str = "wildfire"):
     b = get_briefing(cell_id, as_of, hazard)
     try:
         audio = ai.tts(b["text"])
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"ElevenLabs request failed: {type(exc).__name__}")
+    except ai.VoiceError as exc:
+        raise HTTPException(502, f"ElevenLabs {exc}")
+    except Exception as exc:  # noqa: BLE001 - network errors; no key or headers in the message
+        raise HTTPException(502, f"ElevenLabs request failed: {type(exc).__name__}: {exc}"[:300])
     return Response(audio, media_type="audio/mpeg")
 
 

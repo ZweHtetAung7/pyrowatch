@@ -185,7 +185,9 @@ Open-Meteo and CelesTrak need no key. Fire history (`data/fire_history.json`), v
 `scripts/` rebuild them.
 
 **Deploy** on any Ubuntu server (we used Vultr): clone to `/opt/pyrowatch`, add `.env`, then
-`sudo bash deploy/setup_vultr.sh your-domain` installs a systemd service behind Caddy with HTTPS.
+`sudo bash deploy/setup_vultr.sh your-domain` installs a systemd service behind Caddy with HTTPS,
+pre-loads the replays and refreshes the live forecast every 30 minutes. `sudo bash deploy/update.sh` pulls and
+restarts. `python scripts/check_elevenlabs.py` tests the voice key from the server.
 
 **Hardware:** parts, wiring and flashing steps for the beacon are in [firmware/README.md](firmware/README.md).
 

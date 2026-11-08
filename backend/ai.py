@@ -1,4 +1,5 @@
 """Gemini briefings and Q&A, plus optional ElevenLabs voice. Both degrade gracefully without keys."""
+import hashlib
 import json
 import logging
 import re
@@ -6,8 +7,8 @@ import time
 
 import httpx
 
-from .config import (ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TIMEOUT,
-                     HTTP_TIMEOUT)
+from .config import (CACHE_DIR, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, GEMINI_API_KEY, GEMINI_MODEL,
+                     GEMINI_TIMEOUT, HTTP_TIMEOUT)
 
 log = logging.getLogger("pyrowatch.ai")
 _cache: dict = {}
@@ -258,16 +259,44 @@ def briefing(cell, risk_payload, fires_in_cell=None, hazard="wildfire"):
     return result
 
 
-def tts(text):
-    """MP3 bytes from ElevenLabs, or None when not configured."""
+TTS_MODEL = "eleven_flash_v2_5"
+
+
+class VoiceError(RuntimeError):
+    """An ElevenLabs API error with ElevenLabs' own reason (quota, permissions, blocked free tier...)."""
+
+
+def _elevenlabs_reason(r):
+    try:
+        detail = r.json().get("detail", r.text)
+    except ValueError:
+        detail = r.text
+    if isinstance(detail, dict):
+        detail = " ".join(str(detail.get(k, "")) for k in ("status", "message")).strip() or str(detail)
+    elif isinstance(detail, list):
+        detail = "; ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
+    return f"HTTP {r.status_code}: {' '.join(str(detail).split())[:300]}"
+
+
+def tts(text, use_cache=True):
+    """MP3 bytes from ElevenLabs, or None when not configured. Each clip is saved to data/cache, so
+    replaying the same briefing (a judge clicking Listen twice) costs no extra credits."""
     if not ELEVENLABS_API_KEY:
         return None
+    text = text.replace("•", "")
+    digest = hashlib.md5(f"{ELEVENLABS_VOICE_ID}|{TTS_MODEL}|{text}".encode()).hexdigest()
+    path = CACHE_DIR / f"tts_{digest}.mp3"
+    if use_cache and path.exists():
+        return path.read_bytes()
     r = httpx.post(
         f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
         params={"output_format": "mp3_44100_128"},
         headers={"xi-api-key": ELEVENLABS_API_KEY},
-        json={"text": text.replace("•", ""), "model_id": "eleven_flash_v2_5"},
+        json={"text": text, "model_id": TTS_MODEL},
         timeout=HTTP_TIMEOUT,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise VoiceError(_elevenlabs_reason(r))
+    if use_cache:
+        path.write_bytes(r.content)
     return r.content
