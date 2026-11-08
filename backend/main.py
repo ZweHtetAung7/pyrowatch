@@ -1,5 +1,6 @@
 """PyroWatch API + static frontend.  Run:  uvicorn backend.main:app --reload"""
 import logging
+import threading
 import unicodedata
 from datetime import date
 
@@ -14,7 +15,25 @@ from .config import (DATA_MODE, ELEVENLABS_API_KEY, FIRMS_MAP_KEY, FRONTEND_DIR,
 from .geo import CA_BBOX, PLACES, cell_for_point, haversine_km
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("pyrowatch.main")
 app = FastAPI(title="PyroWatch", version="0.1")
+
+
+@app.on_event("startup")
+def _startup():
+    """Hit external APIs once at load, then serve from DB/cache; keep a 2-week rolling window."""
+
+    def warm():
+        try:
+            log.info("warmup: refreshing live data once (DB/cache first)...")
+            risk.compute_risk(None)
+            risk.fires(None, days=2)
+            store.prune_history(14)
+            log.info("warmup: done (database=%s)", store.status())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("warmup failed (app still serving): %s", exc)
+
+    threading.Thread(target=warm, daemon=True, name="warmup").start()
 
 REPLAY_PRESETS = [
     {"date": "2025-01-06", "label": "LA windstorm — Palisades & Eaton fires (started Jan 7, 2025)"},
@@ -218,6 +237,7 @@ def get_station_history(station_id: str):
 
 
 @app.get("/api/health")
+@app.get("/health")
 def health():
     return {"ok": True}
 

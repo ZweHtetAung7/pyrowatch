@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import statistics
+import threading
 from datetime import date, datetime, timedelta, timezone
 
 from . import sources, store
@@ -24,6 +25,10 @@ from .config import DATA_DIR, LEDGER_DIR, RECORD_LEDGER
 from .geo import build_grid, cell_for_point
 
 log = logging.getLogger("pyrowatch.risk")
+
+LIVE_FRESH_MINUTES = 60
+RETENTION_DAYS = 14
+_refresh_lock = threading.RLock()
 
 FACTORS = [
     {"key": "fuel", "label": "Fuel dryness", "weight": 0.30},
@@ -307,8 +312,26 @@ def compute_risk(as_of: date | None = None):
     d = as_of or today
     if d > today:
         raise ValueError("as_of cannot be in the future")
-    ttl = 1800 if d >= today - timedelta(days=1) else 86400
-    return sources._cached(("risk", d), ttl, lambda: _compute_risk(d, today))
+    # Past replay dates: serve full snapshot from DB (no external API calls).
+    if as_of is not None and d < today:
+        snap = store.get_risk_snapshot(d)
+        if snap:
+            return snap
+    # Live/today: serve a fresh DB snapshot if within LIVE_FRESH_MINUTES (hit once, then reuse).
+    if d == today:
+        snap = store.get_risk_snapshot(today, max_age_minutes=LIVE_FRESH_MINUTES)
+        if snap:
+            return snap
+        with _refresh_lock:
+            snap = store.get_risk_snapshot(today, max_age_minutes=LIVE_FRESH_MINUTES)
+            if snap:
+                return snap
+            result = _compute_risk(d, today)
+            store.prune_history(RETENTION_DAYS)
+            return result
+    ttl = 86400
+    result = sources._cached(("risk", d), ttl, lambda: _compute_risk(d, today))
+    return result
 
 
 def _compute_risk(d: date, today: date):
@@ -377,6 +400,11 @@ def _compute_risk(d: date, today: date):
         if RECORD_LEDGER:
             _record_prediction(result)
         store.in_background(store.record_prediction, result)  # every refresh -> a time series in Tiger Data
+    # Persist full snapshots for fast lookup (live cache + replays/backfill) and enforce retention.
+    store.in_background(store.save_risk_snapshot, d, result)
+    if d < today:
+        store.in_background(store.record_prediction, result)
+    store.in_background(store.prune_history, RETENTION_DAYS)
     return result
 
 
@@ -412,15 +440,46 @@ def load_recorded_prediction(d: date):
 def fires(as_of: date | None = None, days=2):
     """Fire detections for the map: the last `days` days (live) or as_of..as_of+days-1 (replay)."""
     today = sources.today_local()
+    d = as_of or today
+    start = None if (as_of is None or as_of == today) else as_of
+    # Replay windows: serve from DB snapshot when available.
+    if start is not None:
+        snap = store.get_fire_snapshot(d, days)
+        if snap:
+            return snap
+    # Live window: serve a fresh DB snapshot if within LIVE_FRESH_MINUTES.
+    if start is None:
+        snap = store.get_fire_snapshot(today, days, max_age_minutes=LIVE_FRESH_MINUTES)
+        if snap:
+            return snap
+        with _refresh_lock:
+            snap = store.get_fire_snapshot(today, days, max_age_minutes=LIVE_FRESH_MINUTES)
+            if snap:
+                return snap
+            risk = compute_risk(today)
+            demo_risk = {c["id"]: c["risk"] for c in risk["cells"]}
+            dets, status = sources.get_fires(None, days, demo_risk=demo_risk)
+            for det in dets:
+                det["cell_id"] = cell_for_point(det["lat"], det["lon"])
+            result = {"as_of": today.isoformat(), "days": days, "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                      "source": status, "count": len(dets), "detections": dets}
+            if status["mode"] == "live":
+                store.in_background(store.record_detections, dets)
+            store.in_background(store.save_fire_snapshot, today, days, result)
+            store.in_background(store.prune_history, RETENTION_DAYS)
+            return result
     risk = compute_risk(as_of)
     demo_risk = {c["id"]: c["risk"] for c in risk["cells"]}
-    start = None if (as_of is None or as_of == today) else as_of
     dets, status = sources.get_fires(start, days, demo_risk=demo_risk)
     for det in dets:
         det["cell_id"] = cell_for_point(det["lat"], det["lon"])
+    result = {"as_of": d.isoformat(), "days": days, "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+              "source": status, "count": len(dets), "detections": dets}
     if status["mode"] == "live":
         store.in_background(store.record_detections, dets)
-    return {"as_of": (as_of or today).isoformat(), "days": days, "source": status, "count": len(dets), "detections": dets}
+    store.in_background(store.save_fire_snapshot, d, days, result)
+    store.in_background(store.prune_history, RETENTION_DAYS)
+    return result
 
 
 def _auc(pos, neg):

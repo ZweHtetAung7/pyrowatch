@@ -361,7 +361,7 @@ function selectCell(id, { fly = true, focus = false } = {}) {
     <div id="briefing" class="briefing loading">Analyzing conditions…</div>
     <div class="row">${state.config?.has_tts ? '<button id="listen" class="btn-ghost">▶ Listen to briefing</button>' : ''}</div>
 
-    ${!state.asOf && state.config?.database?.ready ? `<h3>Risk over the past week <span class="engine">${state.config.database.timescale ? 'Tiger Data · TimescaleDB' : 'PostgreSQL'}</span></h3>
+    ${!state.asOf && state.config?.database?.ready ? `<h3>${esc(HAZARDS[state.hazard].label)} over the past 2 weeks <span class="engine">${state.config.database.timescale ? 'Tiger Data · TimescaleDB' : 'PostgreSQL'}</span></h3>
     <div id="history" class="history"><div class="muted small">Loading history…</div></div>` : ''}
 
     <h3>Ask PyroWatch</h3>
@@ -376,7 +376,7 @@ function selectCell(id, { fly = true, focus = false } = {}) {
   $('#ask-form').onsubmit = (e) => { e.preventDefault(); ask(id); };
   $('#listen')?.addEventListener('click', () => listen(id));
   loadBriefing(id);
-  if ($('#history')) loadHistory(id);
+  if ($('#history')) loadHistory(id, 14);
   setTimeout(() => renderPasses(c), 30);
   const top = factors[0];
   announce(`${c.name}. ${hazardInfo.label} score ${score == null ? 'unavailable' : `${Math.round(score)} out of 100, ${category}`}.${rank ? ` Rank ${rank} of ${n}.` : ''}${top ? ` Biggest factor: ${top.label}, ${top.explain}.` : ''}`);
@@ -387,26 +387,31 @@ function announce(text) {
   el.textContent = '';
   setTimeout(() => { el.textContent = text; }, 50);
 }
-async function loadHistory(id, days = 7) {
+async function loadHistory(id, days = 14) {
   try {
+    const hazardKey = state.hazard || 'wildfire';
+    const hazardLabel = (HAZARDS[hazardKey] && HAZARDS[hazardKey].label) || 'Risk';
     const h = await api(`/api/history/${id}?days=${days}`);
     const el = $('#history');
     if (!el || state.selected !== id) return;
-    if (h.risk.length < 2) {
-      el.innerHTML = '<div class="muted small">Not enough history yet. Every live refresh is stored, so this chart fills in as PyroWatch runs.</div>';
+    const series = h[hazardKey] || h.wildfire || h.risk || [];
+    if (series.length < 2) {
+      el.innerHTML = `<div class="muted small">Not enough ${esc(hazardLabel.toLowerCase())} history yet for the past ${days} days. Backfill with <code>scripts/backfill_tiger_history.py --days ${days} --fire-days 3</code>, then refreshes will add more points.</div>`;
       return;
     }
     const W = 360, H = 70, end = Date.now(), start = end - days * 864e5;
     const x = (t) => ((Date.parse(t) - start) / (end - start)) * W;
-    const y = (v) => H - 4 - (v / 100) * (H - 8);
-    const pts = h.risk.map((p) => `${x(p.t).toFixed(1)},${y(p.avg).toFixed(1)}`).join(' ');
-    const bars = h.fires.map((f) => `<rect x="${(x(f.t) - 2).toFixed(1)}" y="${H - 10}" width="${Math.max(3, W / days - 2).toFixed(1)}" height="10" rx="2" fill="#ff3b1f" opacity=".85"><title>${f.count} detections</title></rect>`).join('');
-    const last = h.risk[h.risk.length - 1];
-    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Risk index over the past ${days} days">
+    const y = (v) => H - 4 - (Math.max(0, Math.min(100, v)) / 100) * (H - 8);
+    const pts = series.map((p) => `${x(p.t).toFixed(1)},${y(p.avg).toFixed(1)}`).join(' ');
+    const showFireBars = hazardKey === 'wildfire' && (h.fires || []).length;
+    const bars = showFireBars ? h.fires.map((f) => `<rect x="${(x(f.t) - 2).toFixed(1)}" y="${H - 10}" width="${Math.max(3, W / days - 2).toFixed(1)}" height="10" rx="2" fill="#ff3b1f" opacity=".85"><title>${f.count} detections</title></rect>`).join('') : '';
+    const last = series[series.length - 1];
+    const weeks = Math.round(days / 7);
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="${esc(hazardLabel)} index over the past ${weeks} weeks">
         ${[25, 50, 75].map((v) => `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="rgba(148,163,184,.15)"/>`).join('')}
         ${bars}<polyline points="${pts}" fill="none" stroke="${riskColor(last.avg)}" stroke-width="2" stroke-linejoin="round"/>
         <circle cx="${x(last.t)}" cy="${y(last.avg)}" r="3.5" fill="${riskColor(last.avg)}"/></svg>
-      <div class="muted small spark-legend"><span>${days} days ago</span><span>${h.fires.length ? '<i></i> days with fire detections · ' : ''}${h.risk.length} hourly points</span><span>now ${last.avg.toFixed(0)}</span></div>`;
+      <div class="muted small spark-legend"><span>${weeks} weeks ago</span><span>${showFireBars ? '<i></i> days with fire detections · ' : ''}${series.length} points · saved in DB for fast lookup</span><span>now ${last.avg.toFixed(0)}</span></div>`;
   } catch (e) {
     const el = $('#history');
     if (el) el.innerHTML = `<div class="muted small">History unavailable: ${esc(e.message)}</div>`;
