@@ -37,9 +37,28 @@ export function renderAnswer(el, a) {
   el.hidden = false;
   el.innerHTML = `${trace}<div class="answer-text"></div>
     ${links.length ? `<div class="row">${links.map((id) => `<button class="btn-ghost" data-area="${esc(id)}">${esc(cellById(id).name)} →</button>`).join('')}</div>` : ''}
-    <div class="engine">${esc(a.engine)}${a.steps?.length ? ` · ${a.steps.length} tool call${a.steps.length === 1 ? '' : 's'}` : ''}</div>`;
+    <div class="row">${state.config?.has_tts && a.speech_id ? '<button type="button" class="btn-ghost speak-btn">▶ Listen</button>' : ''}<span class="engine">${esc(a.engine)}${a.steps?.length ? ` · ${a.steps.length} tool call${a.steps.length === 1 ? '' : 's'}` : ''}</span></div>`;
   $('.answer-text', el).textContent = a.text;
+  const speak = $('.speak-btn', el);
+  if (speak) speak.addEventListener('click', () => speakAnswer(speak, a.speech_id));
   $$('[data-area]', el).forEach((b) => b.addEventListener('click', () => selectCell(b.dataset.area, { focus: true })));
+}
+
+// Read an answer aloud with ElevenLabs (the server only speaks answers its agent wrote).
+let voice;
+async function speakAnswer(btn, id) {
+  const reset = () => { btn.textContent = '▶ Listen'; btn.disabled = false; };
+  if (voice && !voice.paused && btn.textContent.includes('Stop')) { voice.pause(); reset(); return; }
+  btn.disabled = true; btn.textContent = 'Generating voice…';
+  try {
+    const r = await fetch(`/api/speak/${encodeURIComponent(id)}`);
+    if (!r.ok) throw new Error((await r.json()).detail);
+    voice?.pause();
+    voice = new Audio(URL.createObjectURL(await r.blob()));
+    voice.onended = reset;
+    await voice.play();
+    btn.textContent = '■ Stop'; btn.disabled = false;
+  } catch (e) { toast(`Voice unavailable: ${e.message}`); reset(); }
 }
 
 export async function ask(el, question, cellId = null) {

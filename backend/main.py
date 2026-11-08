@@ -1,4 +1,5 @@
 """PyroWatch API + static frontend.  Run:  uvicorn backend.main:app --reload"""
+import hashlib
 import logging
 import threading
 import unicodedata
@@ -129,10 +130,44 @@ class AskBody(BaseModel):
     as_of: str | None = None
 
 
+# Recent agent answers, so /api/speak can read one aloud by id. Only text the agent wrote can be
+# spoken: nobody can send arbitrary text through our ElevenLabs credits.
+_spoken: dict = {}
+SPEAK_MAX_CHARS = 2500
+
+
 @app.post("/api/ask")
 def post_ask(body: AskBody):
     """Gemini function-calling agent over PyroWatch's own data. Returns the answer + tool trace."""
-    return agent.run(body.question, _parse_date(body.as_of), body.cell_id)
+    result = agent.run(body.question, _parse_date(body.as_of), body.cell_id)
+    text = (result.get("text") or "").strip()
+    if text and ELEVENLABS_API_KEY:
+        sid = hashlib.sha1(text.encode()).hexdigest()[:16]
+        _spoken[sid] = text
+        while len(_spoken) > 300:
+            _spoken.pop(next(iter(_spoken)))
+        result["speech_id"] = sid
+    return result
+
+
+def _voice(text):
+    try:
+        return Response(ai.tts(text), media_type="audio/mpeg")
+    except ai.VoiceError as exc:
+        raise HTTPException(502, f"ElevenLabs {exc}")
+    except Exception as exc:  # noqa: BLE001 - network errors; no key or headers in the message
+        raise HTTPException(502, f"ElevenLabs request failed: {type(exc).__name__}: {exc}"[:300])
+
+
+@app.get("/api/speak/{speech_id}")
+def get_speak(speech_id: str):
+    """Read an agent answer aloud (ElevenLabs). The id comes from /api/ask."""
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(404, "ELEVENLABS_API_KEY not set")
+    text = _spoken.get(speech_id)
+    if not text:
+        raise HTTPException(404, "That answer has expired; ask again.")
+    return _voice(text[:SPEAK_MAX_CHARS])
 
 
 @app.get("/api/tts/{cell_id}")
@@ -140,13 +175,7 @@ def get_tts(cell_id: str, as_of: str | None = None, hazard: str = "wildfire"):
     if not ELEVENLABS_API_KEY:
         raise HTTPException(404, "ELEVENLABS_API_KEY not set")
     b = get_briefing(cell_id, as_of, hazard)
-    try:
-        audio = ai.tts(b["text"])
-    except ai.VoiceError as exc:
-        raise HTTPException(502, f"ElevenLabs {exc}")
-    except Exception as exc:  # noqa: BLE001 - network errors; no key or headers in the message
-        raise HTTPException(502, f"ElevenLabs request failed: {type(exc).__name__}: {exc}"[:300])
-    return Response(audio, media_type="audio/mpeg")
+    return _voice(b["text"])
 
 
 @app.get("/api/history/{cell_id}")
