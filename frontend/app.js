@@ -130,27 +130,95 @@ async function loadData() {
 }
 
 // ------------------------------------------------------------------ rendering: risk grid
+// "smooth": a continuous color surface clipped to California (areas stay clickable on top);
+// "grid": the 50 km squares themselves.
+let riskView = 'smooth';
+try { riskView = localStorage.getItem('pw-view') === 'grid' ? 'grid' : 'smooth'; } catch (_) { /* storage blocked */ }
+let surfaceLayer = null;
+const restStyle = (col) => (riskView === 'smooth'
+  ? { color: '#ffffff', weight: 0, opacity: 0, fillColor: col, fillOpacity: 0 }
+  : { color: col, weight: 0.6, opacity: 0.55, fillColor: col, fillOpacity: 0.5 });
+const hoverStyle = () => (riskView === 'smooth' ? { weight: 1, opacity: 0.6 } : { fillOpacity: 0.7 });
+
 function renderRisk() {
   layers.risk.clearLayers();
   for (const k of Object.keys(polys)) delete polys[k];
   for (const c of state.risk.cells) {
     const col = riskColor(c.risk);
-    const p = L.polygon(c.shape, { color: col, weight: 0.6, opacity: 0.55, fillColor: col, fillOpacity: 0.5 });
+    const p = L.polygon(c.shape, restStyle(col));
     p.bindTooltip(`<b>${esc(c.name)}</b><br>Risk ${c.risk.toFixed(0)} · ${esc(c.category)}`, { sticky: true, className: 'tip', direction: 'top', offset: [0, -8] });
     p.on('click', () => selectCell(c.id));
-    p.on('mouseover', () => { if (state.selected !== c.id) p.setStyle({ fillOpacity: 0.7 }); });
-    p.on('mouseout', () => { if (state.selected !== c.id) p.setStyle({ fillOpacity: 0.5 }); });
+    p.on('mouseover', () => { if (state.selected !== c.id) p.setStyle(hoverStyle()); });
+    p.on('mouseout', () => { if (state.selected !== c.id) p.setStyle(restStyle(p.options.fillColor)); });
     p.addTo(layers.risk);
     polys[c.id] = p;
   }
+  renderSurface();
   highlight();
 }
 function highlight() {
   for (const [id, p] of Object.entries(polys)) {
     const sel = id === state.selected;
-    p.setStyle(sel ? { color: '#ffffff', weight: 2.5, opacity: 1, fillOpacity: 0.72 } : { color: p.options.fillColor, weight: 0.6, opacity: 0.55, fillOpacity: 0.5 });
+    p.setStyle(sel ? { color: '#ffffff', weight: 2.5, opacity: 1, fillOpacity: riskView === 'smooth' ? 0.08 : 0.72 } : restStyle(p.options.fillColor));
     if (sel) p.bringToFront();
   }
+}
+
+// Smooth surface: bilinear interpolation between area centers, drawn on a canvas whose rows are
+// spaced in Web Mercator (so it lines up with the map), then clipped to the areas' outlines.
+const mercY = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+const invMercY = (y) => ((2 * Math.atan(Math.exp(y)) - Math.PI / 2) * 180) / Math.PI;
+function renderSurface() {
+  if (surfaceLayer) { layers.risk.removeLayer(surfaceLayer); surfaceLayer = null; }
+  if (riskView !== 'smooth' || !state.risk || !state.config?.grid) return;
+  const g = state.config.grid;
+  const vals = new Map();
+  let maxR = 0, maxC = 0;
+  for (const c of state.risk.cells) {
+    const m = /^r(\d+)c(\d+)$/.exec(c.id);
+    if (!m) continue;
+    vals.set(+m[1] * 1000 + +m[2], c.risk);
+    maxR = Math.max(maxR, +m[1]); maxC = Math.max(maxC, +m[2]);
+  }
+  const west = g.west, south = g.south, east = west + (maxC + 1) * g.step, north = south + (maxR + 1) * g.step;
+  const W = 640, H = 640, yN = mercY(north), yS = mercY(south);
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(W, H), d = img.data;
+  for (let j = 0; j < H; j++) {
+    const fr = (invMercY(yN - ((j + 0.5) / H) * (yN - yS)) - south) / g.step - 0.5;
+    const r0 = Math.floor(fr), tr = fr - r0;
+    for (let i = 0; i < W; i++) {
+      const fc = (((i + 0.5) / W) * (east - west)) / g.step - 0.5;
+      const c0 = Math.floor(fc), tc = fc - c0;
+      let s = 0, w = 0;
+      for (const [dr, dc, wt] of [[0, 0, (1 - tr) * (1 - tc)], [1, 0, tr * (1 - tc)], [0, 1, (1 - tr) * tc], [1, 1, tr * tc]]) {
+        const v = vals.get((r0 + dr) * 1000 + (c0 + dc));
+        if (v !== undefined && wt > 0) { s += v * wt; w += wt; }
+      }
+      if (!w) continue;
+      const v = s / w, [R, G, B] = rgbAt(v), k = (j * W + i) * 4;
+      d[k] = R; d[k + 1] = G; d[k + 2] = B; d[k + 3] = Math.round(255 * (0.55 + (0.4 * v) / 100));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.beginPath();
+  const px = (lat, lon) => [((lon - west) / (east - west)) * W, ((yN - mercY(lat)) / (yN - yS)) * H];
+  for (const c of state.risk.cells) {
+    c.shape.forEach(([la, lo], k) => { const [x, y] = px(la, lo); if (k) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    ctx.closePath();
+  }
+  ctx.fill();
+  surfaceLayer = L.imageOverlay(cv.toDataURL(), [[south, west], [north, east]], { interactive: false, className: 'risk-surface' }).addTo(layers.risk);
+  surfaceLayer.bringToBack();
+}
+function applyView() {
+  const b = $('#view-btn');
+  if (!b) return;
+  b.textContent = riskView === 'smooth' ? 'View: smooth ⇄' : 'View: grid ⇄';
+  b.setAttribute('aria-label', `Map view: ${riskView}. Switch.`);
 }
 
 // ------------------------------------------------------------------ rendering: fires
@@ -589,6 +657,13 @@ function initControls() {
     if (state.risk) { renderRisk(); renderStats(); if (state.selected) selectCell(state.selected, { fly: false }); }
   };
   applyPalette();
+  $('#view-btn').onclick = () => {
+    riskView = riskView === 'smooth' ? 'grid' : 'smooth';
+    try { localStorage.setItem('pw-view', riskView); } catch (_) { /* storage blocked */ }
+    applyView();
+    if (state.risk) renderRisk();
+  };
+  applyView();
   $('#omni').onsubmit = (e) => {
     e.preventDefault();
     const q = $('#omni-q').value.trim();
