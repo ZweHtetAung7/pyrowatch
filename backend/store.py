@@ -33,6 +33,8 @@ SCHEMA = [
          gust_kmh        real,
          rh_min_pct      real,
          days_since_rain real,
+         thunderstorm_score real,
+         blizzard_score  real,
          PRIMARY KEY (cell_id, recorded_at))""",
     """CREATE TABLE IF NOT EXISTS fire_detections (
          time        timestamptz      NOT NULL,
@@ -56,6 +58,12 @@ SCHEMA = [
          PRIMARY KEY (station_id, time))""",
     "CREATE INDEX IF NOT EXISTS risk_predictions_asof ON risk_predictions (as_of, recorded_at)",
     "CREATE INDEX IF NOT EXISTS fire_detections_cell ON fire_detections (cell_id, time DESC)",
+]
+MIGRATIONS = [
+    # CREATE TABLE IF NOT EXISTS does not add columns to existing PostgreSQL/TimescaleDB
+    # installations. Nullable columns keep older rows valid and make this migration repeatable.
+    "ALTER TABLE risk_predictions ADD COLUMN IF NOT EXISTS thunderstorm_score real",
+    "ALTER TABLE risk_predictions ADD COLUMN IF NOT EXISTS blizzard_score real",
 ]
 HYPERTABLES = [
     "SELECT create_hypertable('risk_predictions', 'recorded_at', if_not_exists => TRUE, migrate_data => TRUE)",
@@ -81,6 +89,8 @@ def _connect():
         conn = psycopg.connect(DATABASE_URL, autocommit=True, connect_timeout=8, client_encoding="UTF8")
         if _state["ready"] is None:
             for sql in SCHEMA:
+                conn.execute(sql)
+            for sql in MIGRATIONS:
                 conn.execute(sql)
             try:
                 conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
@@ -132,14 +142,19 @@ def in_background(fn, *args):
 def record_prediction(result):
     rows = [
         (result["generated_at"], result["as_of"], c["id"], c["risk"], c["category"], c.get("ml_prob"),
-         c["raw"].get("gust_kmh"), c["raw"].get("rh_min_pct"), c["raw"].get("days_since_rain"))
+         c["raw"].get("gust_kmh"), c["raw"].get("rh_min_pct"), c["raw"].get("days_since_rain"),
+         (c.get("hazards", {}).get("thunderstorm") or {}).get("score"),
+         (c.get("hazards", {}).get("blizzard") or {}).get("score"))
         for c in result["cells"]
     ]
 
     def write(conn):
         with conn.cursor() as cur:
             cur.executemany(
-                "INSERT INTO risk_predictions VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", rows)
+                "INSERT INTO risk_predictions "
+                "(recorded_at, as_of, cell_id, risk, category, ml_prob, gust_kmh, rh_min_pct, days_since_rain, "
+                "thunderstorm_score, blizzard_score) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", rows)
         return len(rows)
 
     return _run(write)

@@ -44,6 +44,11 @@ started over the next three days. Reproduce with `python scripts/check_presets.p
 
 - **Every score shows its work.** Click an area to see how many points each factor adds, the
   standard Fosberg index next to it, and the trained model's 7-day fire probability.
+- **Three selectable hazard outlooks.** The map also scores thunderstorm potential from peak
+  hourly CAPE and blizzard conditions from 48-hour snowfall, wind and cold. Each has an area-level
+  factor breakdown and preparedness suggestions; these are screening indices, not probabilities
+  or official warnings. Existing wildfire scores remain the default and `/api/beacon` wildfire
+  fields remain unchanged.
 - **Ask PyroWatch.** Type a town to jump to it, or ask a question. A Gemini agent answers by calling
   eight of PyroWatch's own tools (area lookup, comparisons, fires nearby, satellite passes,
   validation, ground stations), and lists every call above its answer.
@@ -106,6 +111,13 @@ veg_gate  = 0.2 + 0.8 × vegetation           bare desert can't rank high
 
 The panel breakdown is exactly these points. Replays only use data that existed on the replay date:
 weather up to that day, fire history from the five years before, and vegetation from 2016.
+
+The **thunderstorm index** scales peak hourly CAPE (J/kg) over the 48-hour window to 0–100; CAPE
+describes atmospheric instability, not the probability of lightning or a storm. The **blizzard
+index** combines 48-hour snowfall (cm), forecast gusts and cold, and gates wind/cold contributions
+by snowfall so they cannot produce a high score without accumulating snow. Both are relative
+screening indices, not official forecasts or alerts. Open-Meteo's hourly `cape` and `snowfall`
+measurements feed these calculations; demo mode produces deterministic synthetic hourly values.
 
 ### Validation
 

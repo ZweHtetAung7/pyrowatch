@@ -1,5 +1,6 @@
 'use strict';
 /* PyroWatch frontend: Leaflet map + risk grid + FIRMS fires + live satellite orbits (satellite.js). */
+import { HAZARDS, hazardActions, hazardFor } from './hazards.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -39,8 +40,13 @@ const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').match
 const state = {
   config: null, asOf: null, risk: null, fires: null, selected: null, validation: null,
   sats: [], satSource: null, firesRevealed: true, stations: [],
+  hazard: 'wildfire',
   show: { risk: true, fires: true, sats: true, stations: true },
 };
+try {
+  const savedHazard = localStorage.getItem('pw-hazard');
+  if (HAZARDS[savedHazard]) state.hazard = savedHazard;
+} catch (_) { /* storage blocked */ }
 
 // ------------------------------------------------------------------ map
 // Leaflet's own arrow-key panning is off: arrow keys move between areas instead (see initKeyboard).
@@ -91,6 +97,8 @@ const fmtLong = (iso) => fmtDate(iso, { month: 'short', day: 'numeric', year: 'n
 const fmtTime = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const fmtUtc = (iso) => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const cellById = (id) => state.risk?.cells.find((c) => c.id === id);
+const activeHazard = (cell) => hazardFor(cell, state.hazard);
+const activeScore = (cell) => activeHazard(cell).score;
 function haversineKm(a, b, c, d) {
   const R = 6371, r = Math.PI / 180;
   const x = Math.sin(((c - a) * r) / 2) ** 2 + Math.cos(a * r) * Math.cos(c * r) * Math.sin(((d - b) * r) / 2) ** 2;
@@ -144,9 +152,11 @@ function renderRisk() {
   layers.risk.clearLayers();
   for (const k of Object.keys(polys)) delete polys[k];
   for (const c of state.risk.cells) {
-    const col = riskColor(c.risk);
+    const score = activeScore(c);
+    const col = score == null ? '#424b55' : riskColor(score);
     const p = L.polygon(c.shape, restStyle(col));
-    p.bindTooltip(`<b>${esc(c.name)}</b><br>Risk ${c.risk.toFixed(0)} · ${esc(c.category)}`, { sticky: true, className: 'tip', direction: 'top', offset: [0, -8] });
+    const category = activeHazard(c).category;
+    p.bindTooltip(`<b>${esc(c.name)}</b><br>${esc(HAZARDS[state.hazard].label)} ${score == null ? 'unavailable' : `${score.toFixed(0)} · ${esc(category || '')}`}`, { sticky: true, className: 'tip', direction: 'top', offset: [0, -8] });
     p.on('click', () => selectCell(c.id));
     p.on('mouseover', () => { if (state.selected !== c.id) p.setStyle(hoverStyle()); });
     p.on('mouseout', () => { if (state.selected !== c.id) p.setStyle(restStyle(p.options.fillColor)); });
@@ -177,7 +187,8 @@ function renderSurface() {
   for (const c of state.risk.cells) {
     const m = /^r(\d+)c(\d+)$/.exec(c.id);
     if (!m) continue;
-    vals.set(+m[1] * 1000 + +m[2], c.risk);
+    const score = activeScore(c);
+    if (score != null) vals.set(+m[1] * 1000 + +m[2], score);
     maxR = Math.max(maxR, +m[1]); maxC = Math.max(maxC, +m[2]);
   }
   const west = g.west, south = g.south, east = west + (maxC + 1) * g.step, north = south + (maxR + 1) * g.step;
@@ -274,14 +285,16 @@ function renderStats(message) {
   }
   const r = state.risk, f = state.fires;
   if (!r) { renderStats('Waiting for data…'); return; }
-  const hot = (r.counts.Extreme || 0) + (r.counts['Very high'] || 0) + (r.counts.High || 0);
-  const top = r.top && r.top[0];
+  const counts = r.counts_by_hazard?.[state.hazard] || r.counts;
+  const hot = (counts.Extreme || 0) + (counts['Very high'] || 0) + (counts.High || 0);
+  const top = r.top_by_hazard?.[state.hazard]?.[0] || r.top?.[0];
+  const topScore = state.hazard === 'wildfire' ? top?.risk : top?.score;
   const firesLabel = state.asOf ? 'Fires, next 72 h' : 'Fire detections, 48 h';
   const firesVal = state.asOf && !state.firesRevealed ? '<small>hidden</small>' : `${f?.count ?? '–'}`;
   $('#stats').innerHTML = `
     <div class="stat"><div class="k">${firesLabel}</div><div class="v">${firesVal}</div></div>
-    <div class="stat"><div class="k">Areas high risk or above</div><div class="v">${hot}<small> / ${r.cells.length}</small></div></div>
-    <div class="stat"><div class="k">Highest risk</div><div class="v name" title="${esc(top ? top.name : '')}">${top ? `${esc(top.name)} · ${top.risk.toFixed(0)}` : '–'}</div></div>`;
+    <div class="stat"><div class="k">Areas high ${esc(HAZARDS[state.hazard].label.toLowerCase())} or above</div><div class="v">${hot}<small> / ${r.cells.length}</small></div></div>
+    <div class="stat"><div class="k">Highest ${esc(HAZARDS[state.hazard].label.toLowerCase())}</div><div class="v name" title="${esc(top ? top.name : '')}">${top ? `${esc(top.name)} · ${Number(topScore).toFixed(0)}` : '–'}</div></div>`;
 }
 async function reveal() {
   state.firesRevealed = true;
@@ -306,7 +319,13 @@ function selectCell(id, { fly = true, focus = false } = {}) {
   else if (fly && !map.getBounds().pad(-0.15).contains([c.lat, c.lon])) go([c.lat, c.lon], map.getZoom());
   const n = state.risk.cells.length;
   const fic = firesInCell(id);
-  const factors = [...c.factors].sort((a, b) => b.points - a.points);
+  const hazardData = activeHazard(c);
+  const factors = [...(hazardData.factors || [])].sort((a, b) => b.points - a.points);
+  const score = hazardData.score;
+  const category = hazardData.category;
+  const hazardInfo = HAZARDS[state.hazard];
+  const rank = hazardData.rank || c.rank;
+  const actions = hazardActions(state.hazard, score);
   const panel = $('#panel');
   panel.hidden = false;
   panel.innerHTML = `
@@ -314,17 +333,18 @@ function selectCell(id, { fly = true, focus = false } = {}) {
     <div class="eyebrow">AREA ${esc(c.id)} · ${c.lat.toFixed(2)}°, ${c.lon.toFixed(2)}°</div>
     <h2 tabindex="-1">${esc(c.name)}</h2>
     <div class="score-row">
-      <div class="score" style="--c:${riskColor(c.risk)}">${Math.round(c.risk)}<span>/100</span></div>
+      <div class="score" style="--c:${riskColor(score ?? 0)}">${score == null ? '—' : Math.round(score)}<span>/100</span></div>
       <div>
-        <span class="chip" style="background:${catColor(c.category)};color:${catTextColor(c.category)}">${esc(c.category)} risk</span>
-        <div class="muted small" style="margin-top:6px">Rank #${c.rank} of ${n} areas statewide</div>
-        ${c.raw.ffwi != null ? `<div class="muted small" title="US Forest Service index from temperature, humidity and wind only, used in National Weather Service fire-weather products">Fosberg fire weather index: <b>${Math.round(c.raw.ffwi)}</b>/100 (standard, weather only)</div>` : ''}
-        ${c.ml_prob != null ? `<div class="small" style="margin-top:2px">ML model: <b>${(c.ml_prob * 100).toFixed(0)}%</b> chance of a new fire within 7 days</div>` : ''}
-        ${fic != null ? `<div class="muted small">${fic} fire detection${fic === 1 ? '' : 's'} here ${state.asOf ? 'in the next 72 h' : 'in the last 48 h'}</div>` : ''}
+        ${category ? `<span class="chip" style="background:${catColor(category)};color:${catTextColor(category)}">${esc(category)} ${esc(hazardInfo.shortLabel.toLowerCase())}</span>` : '<span class="chip unavailable">Score unavailable</span>'}
+        <div class="muted small" style="margin-top:6px">${rank ? `Rank #${rank} of ${n} areas statewide` : 'Required forecast measurements are unavailable'}</div>
+        ${state.hazard === 'wildfire' && c.raw.ffwi != null ? `<div class="muted small" title="US Forest Service index from temperature, humidity and wind only, used in National Weather Service fire-weather products">Fosberg fire weather index: <b>${Math.round(c.raw.ffwi)}</b>/100 (standard, weather only)</div>` : ''}
+        ${state.hazard === 'wildfire' && c.ml_prob != null ? `<div class="small" style="margin-top:2px">ML model: <b>${(c.ml_prob * 100).toFixed(0)}%</b> chance of a new fire within 7 days</div>` : ''}
+        ${state.hazard === 'wildfire' && fic != null ? `<div class="muted small">${fic} fire detection${fic === 1 ? '' : 's'} here ${state.asOf ? 'in the next 72 h' : 'in the last 48 h'}</div>` : ''}
       </div>
     </div>
 
-    <h3>Why this score</h3>
+    <h3>${esc(hazardInfo.label)} score breakdown</h3>
+    <p class="muted small hazard-caveat">${esc(hazardInfo.caveat)}</p>
     <ul class="factors">${factors.map((f) => `
       <li>
         <div class="f-top"><span>${esc(f.label)}<span class="w">weight ${(f.weight * 100).toFixed(0)}%</span></span><span class="pts">+${f.points.toFixed(1)}</span></div>
@@ -332,8 +352,10 @@ function selectCell(id, { fly = true, focus = false } = {}) {
         <div class="f-exp">${f.value == null ? 'no data — weight redistributed' : esc(f.explain)}</div>
       </li>`).join('')}
     </ul>
-    ${stationBlock(c)}
-    <p class="gate muted">Points = 100 × weight × factor score × fuel gate (×${c.fuel_gate.toFixed(2)})${c.veg_gate != null && c.vegetation ? ` × vegetation (×${c.veg_gate.toFixed(2)})` : ''}. Wet fuels shrink the fuel gate, so wind over green hills doesn't read as fire weather${c.vegetation ? `; the vegetation multiplier keeps bare desert from ranking high. ${esc(c.vegetation.charAt(0).toUpperCase() + c.vegetation.slice(1))}.` : '.'}</p>
+    ${factors.length ? '' : '<div class="muted small">No usable measurements were reported for this hazard window.</div>'}
+    ${state.hazard === 'wildfire' ? stationBlock(c) : ''}
+    ${state.hazard === 'wildfire' ? `<p class="gate muted">Points = 100 × weight × factor score × fuel gate (×${c.fuel_gate.toFixed(2)})${c.veg_gate != null && c.vegetation ? ` × vegetation (×${c.veg_gate.toFixed(2)})` : ''}. Wet fuels shrink the fuel gate, so wind over green hills doesn't read as fire weather${c.vegetation ? `; the vegetation multiplier keeps bare desert from ranking high. ${esc(c.vegetation.charAt(0).toUpperCase() + c.vegetation.slice(1))}.` : '.'}</p>` : ''}
+    <div class="hazard-actions"><b>Suggested actions</b><ul>${actions.map((action) => `<li>${esc(action)}</li>`).join('')}</ul></div>
 
     <h3>AI briefing <span class="engine" id="engine">…</span></h3>
     <div id="briefing" class="briefing loading">Analyzing conditions…</div>
@@ -357,7 +379,7 @@ function selectCell(id, { fly = true, focus = false } = {}) {
   if ($('#history')) loadHistory(id);
   setTimeout(() => renderPasses(c), 30);
   const top = factors[0];
-  announce(`${c.name}. Risk ${Math.round(c.risk)} out of 100, ${c.category}. Rank ${c.rank} of ${n}. Biggest factor: ${top.label}, ${top.explain}.`);
+  announce(`${c.name}. ${hazardInfo.label} score ${score == null ? 'unavailable' : `${Math.round(score)} out of 100, ${category}`}.${rank ? ` Rank ${rank} of ${n}.` : ''}${top ? ` Biggest factor: ${top.label}, ${top.explain}.` : ''}`);
   if (focus) $('h2', panel).focus({ preventScroll: true });
 }
 function announce(text) {
@@ -392,9 +414,10 @@ async function loadHistory(id, days = 7) {
 }
 async function loadBriefing(id) {
   const asOf = state.asOf;
+  const hazard = state.hazard;
   try {
-    const b = await api(`/api/briefing/${id}${qs()}`);
-    if (state.selected !== id || state.asOf !== asOf) return;
+    const b = await api(`/api/briefing/${id}${qs({ hazard })}`);
+    if (state.selected !== id || state.asOf !== asOf || state.hazard !== hazard) return;
     const el = $('#briefing');
     el.classList.remove('loading');
     el.textContent = b.text;
@@ -453,7 +476,7 @@ async function listen(id) {
   const btn = $('#listen');
   btn.disabled = true; btn.textContent = 'Generating voice…';
   try {
-    const r = await fetch(`/api/tts/${id}${qs()}`);
+    const r = await fetch(`/api/tts/${id}${qs({ hazard: state.hazard })}`);
     if (!r.ok) throw new Error((await r.json()).detail);
     audio?.pause();
     audio = new Audio(URL.createObjectURL(await r.blob()));
@@ -646,6 +669,17 @@ function initControls() {
   $('#mode-replay').onclick = () => setMode(true);
   $('#validate').onclick = runValidation;
   $('#reveal').onclick = reveal;
+  $('#hazard-select').value = state.hazard;
+  $('#hazard-select').onchange = (e) => {
+    if (!HAZARDS[e.target.value]) return;
+    state.hazard = e.target.value;
+    try { localStorage.setItem('pw-hazard', state.hazard); } catch (_) { /* storage blocked */ }
+    $('.legend-title').textContent = `${HAZARDS[state.hazard].mapLabel} · next 48 h`;
+    if (state.risk) {
+      renderRisk(); renderStats();
+      if (state.selected) selectCell(state.selected, { fly: false });
+    }
+  };
   document.querySelectorAll('.toggle').forEach((b) => b.addEventListener('click', () => {
     const k = b.dataset.layer;
     state.show[k] = !state.show[k];
@@ -775,6 +809,7 @@ function applyPalette() {
   $('.scale').style.background = `linear-gradient(90deg, ${stops.map(([v, c]) => `rgb(${c.join(',')}) ${v}%`).join(', ')})`;
   $('#palette-btn').textContent = `Colors: ${PALETTES[palette].label} ⇄`;
   $('#palette-btn').setAttribute('aria-label', `Color scale: ${PALETTES[palette].label}. Switch.`);
+  $('.legend-title').textContent = `${HAZARDS[state.hazard].mapLabel} · next 48 h`;
 }
 
 // ------------------------------------------------------------------ keyboard + search

@@ -37,6 +37,7 @@ DAILY_VARS = [
     "vapour_pressure_deficit_max",
     "et0_fao_evapotranspiration",
 ]
+HOURLY_VARS = ["cape", "snowfall"]
 
 FIRMS_NRT = [("VIIRS_NOAA20_NRT", "NOAA-20"), ("VIIRS_NOAA21_NRT", "NOAA-21"), ("VIIRS_SNPP_NRT", "Suomi NPP"), ("MODIS_NRT", None)]
 FIRMS_SP = [("VIIRS_SNPP_SP", "Suomi NPP"), ("VIIRS_NOAA20_SP", "NOAA-20"), ("MODIS_SP", None)]
@@ -128,7 +129,7 @@ def get_weather(points, start: date, end: date):
     # Reanalysis data more than ~5 days old never changes: keep it on disk so reruns and replay
     # demos cost no API quota.
     historical = end < today - timedelta(days=6)
-    digest = hashlib.md5(json.dumps([[round(a, 4), round(b, 4)] for a, b in points] + [str(start), str(end), DAILY_VARS]).encode()).hexdigest()[:16]
+    digest = hashlib.md5(json.dumps([[round(a, 4), round(b, 4)] for a, b in points] + [str(start), str(end), DAILY_VARS, HOURLY_VARS]).encode()).hexdigest()[:16]
     disk_path = CACHE_DIR / f"weather_{digest}.json"
     if historical and DATA_MODE != "demo" and disk_path.exists():
         return json.loads(disk_path.read_text()), {"source": label + " (cached)", "mode": "live"}
@@ -137,6 +138,9 @@ def get_weather(points, start: date, end: date):
         url = "https://api.open-meteo.com/v1/forecast" if use_forecast_api else "https://archive-api.open-meteo.com/v1/archive"
         variables = list(DAILY_VARS)
         out = []
+        # CAPE and snowfall are only needed for the forecast/replay window, not the 30-day
+        # antecedent fuel-dryness lookback. Keep the hourly request to those two days.
+        hourly_start = max(start, end - timedelta(days=1))
         for batch in _chunks(list(points), 50):
             for _attempt in range(4):
                 params = {
@@ -160,12 +164,52 @@ def get_weather(points, start: date, end: date):
                 r.raise_for_status()
                 break
             js = r.json()
-            for loc in js if isinstance(js, list) else [js]:
+            locations = js if isinstance(js, list) else [js]
+            for loc in locations:
                 daily = loc.get("daily", {})
                 times = daily.get("time", [])
                 out.append(
                     {t: {v: (daily.get(v) or [None] * len(times))[i] for v in DAILY_VARS} for i, t in enumerate(times)}
                 )
+            # Some Open-Meteo backends do not publish one of these variables for every
+            # historical model. Keep the daily weather usable and report missing hazards
+            # as unavailable rather than treating missing values as zero.
+            hourly_params = {
+                "latitude": ",".join(f"{p[0]:.4f}" for p in batch),
+                "longitude": ",".join(f"{p[1]:.4f}" for p in batch),
+                "hourly": ",".join(HOURLY_VARS),
+                "start_date": hourly_start.isoformat(),
+                "end_date": end.isoformat(),
+                "timezone": TIMEZONE,
+                "wind_speed_unit": "kmh",
+            }
+            try:
+                hr = _get(url, hourly_params, retries=3, wait=15)
+                hr.raise_for_status()
+                hourly_locations = hr.json()
+                hourly_locations = hourly_locations if isinstance(hourly_locations, list) else [hourly_locations]
+                if len(hourly_locations) != len(locations):
+                    raise RuntimeError("hourly weather location count mismatch")
+                offset = len(out) - len(locations)
+                for i, loc in enumerate(hourly_locations):
+                    hourly = loc.get("hourly", {})
+                    stamps = hourly.get("time", [])
+                    daily_metrics = {}
+                    for j, stamp in enumerate(stamps):
+                        day = stamp.split("T", 1)[0]
+                        bucket = daily_metrics.setdefault(day, {"cape": [], "snowfall": []})
+                        for variable in HOURLY_VARS:
+                            values = hourly.get(variable) or []
+                            value = values[j] if j < len(values) else None
+                            if value is not None:
+                                bucket[variable].append(value)
+                    for day, metrics in daily_metrics.items():
+                        row = out[offset + i].setdefault(day, {})
+                        row["cape_max_jkg"] = max(metrics["cape"]) if metrics["cape"] else None
+                        # Open-Meteo reports snowfall in cm; keep that unit explicit downstream.
+                        row["snowfall_sum_cm"] = sum(metrics["snowfall"]) if metrics["snowfall"] else None
+            except Exception as exc:  # noqa: BLE001 - core fire-weather inputs remain available
+                log.warning("Open-Meteo hourly CAPE/snowfall unavailable: %s", type(exc).__name__)
         if len(out) != len(points):
             raise RuntimeError(f"expected {len(points)} locations, got {len(out)}")
         if historical:

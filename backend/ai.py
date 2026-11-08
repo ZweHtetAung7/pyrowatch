@@ -15,25 +15,39 @@ _cache: dict = {}
 SYSTEM = """You are PyroWatch, a fire-weather analyst writing for emergency managers and residents in California.
 Rules:
 - Use only the numbers in the context. Do not invent data, place names, road names, or resources.
-- The score is a relative risk index from 0 to 100, NOT a probability. Never say a fire will definitely start.
+- Every score is a relative index from 0 to 100, NOT a probability or official warning. Never claim a hazard will definitely occur.
+- CAPE indicates atmospheric instability, not that lightning or a thunderstorm will occur. Snowfall, wind and temperature are forecast measurements, not an official blizzard warning.
 - Lead with what matters most (the factors with the most points). Be concrete: quote the key numbers.
 - If any source in the context has mode "demo", add the sentence "Note: based on simulated demo data."
 - Plain text only. No markdown headings, no asterisks."""
 
-BRIEFING_TASK = """Write a briefing for this area in under 110 words:
-Line 1: "<CATEGORY> RISK — <short reason>" (category in capitals).
-Then 2-3 sentences on why, naming the top drivers and their numbers, and how conditions change over the 48 h window.
-Then "Recommended:" followed by two short bullet points starting with "• " (preparedness actions proportional to the risk level)."""
+BRIEFING_TASK = """Write a briefing for the selected hazard in this area in under 110 words:
+Line 1: "<CATEGORY> <HAZARD> — <short reason>" (category in capitals).
+Then 2-3 sentences on the selected hazard's score, top drivers and measurements over the 48 h window.
+Then "Recommended:" followed by two short bullet points starting with "• " (practical, proportional preparedness actions).
+Distinguish relative indices from probabilities and official warnings."""
 
 
-def _cell_context(cell, risk_payload, fires_in_cell=None):
+def _cell_context(cell, risk_payload, fires_in_cell=None, hazard="wildfire"):
+    hazard_data = cell.get("hazards", {}).get(hazard) or {
+        "score": cell.get("risk"), "category": cell.get("category"), "factors": cell.get("factors", [])
+    }
     neighbors = [
-        {"name": c["name"], "risk": c["risk"]}
+        {"name": c["name"], "score": (c.get("hazards", {}).get(hazard) or {}).get("score", c.get("risk"))}
         for c in risk_payload["cells"]
         if c["id"] != cell["id"] and abs(c["lat"] - cell["lat"]) <= 0.6 and abs(c["lon"] - cell["lon"]) <= 0.6
     ]
     return {
         "area": cell["name"],
+        "selected_hazard": hazard,
+        "hazard_score": hazard_data.get("score"),
+        "hazard_category": hazard_data.get("category"),
+        "hazard_factors": [{"factor": f["label"], "points": f["points"], "score_0_1": f.get("value"), "measured": f["explain"]}
+                           for f in hazard_data.get("factors", [])],
+        "available_hazard_scores": {
+            key: {"score": data.get("score"), "category": data.get("category")}
+            for key, data in cell.get("hazards", {}).items()
+        },
         "as_of": risk_payload["as_of"],
         "window": risk_payload["window"],
         "risk_index": cell["risk"],
@@ -196,16 +210,28 @@ def _gemini(prompt):
 
 
 def _template_briefing(ctx):
-    top = sorted(ctx["factors"], key=lambda f: -f["points"])[:3]
-    reason = ", ".join(f["factor"].lower() for f in top[:2])
+    hazard = ctx.get("selected_hazard", "wildfire")
+    top = sorted(ctx.get("hazard_factors", ctx["factors"]), key=lambda f: -f["points"])[:3]
+    reason = ", ".join(f["factor"].lower() for f in top[:2]) or "forecast measurements unavailable"
+    score = ctx.get("hazard_score")
+    category = ctx.get("hazard_category") or "Unavailable"
+    label = {"wildfire": "WILDFIRE", "thunderstorm": "THUNDERSTORM", "blizzard": "BLIZZARD"}.get(hazard, hazard.upper())
+    if score is None:
+        return f"{label} SCORE UNAVAILABLE — required forecast measurements are not available for this area."
     lines = [
-        f"{ctx['category'].upper()} RISK — driven by {reason}.",
-        f"Risk index {ctx['risk_index']:.0f}/100, ranked {ctx['rank']}. "
+        f"{category.upper()} {label} — driven by {reason}.",
+        f"Relative index {score:.0f}/100 for {ctx['window']}. "
         + " ".join(f"{f['factor']}: {f['measured']}." for f in top),
     ]
-    if ctx["risk_index"] >= 60:
+    if hazard == "thunderstorm":
+        lines.append("CAPE describes atmospheric instability; it is not a probability of lightning or a thunderstorm.")
+        lines.append("Recommended:\n• Monitor official weather alerts and radar for developing storms.\n• If thunder is heard, move indoors and avoid exposed high ground.")
+    elif hazard == "blizzard":
+        lines.append("This is a screening index, not an official blizzard warning.")
+        lines.append("Recommended:\n• Check official winter-weather and road advisories before travel.\n• Prepare warm layers, food, water and a charged phone if travel is necessary.")
+    elif score >= 60:
         lines.append("Recommended:\n• Pre-position initial-attack crews and check evacuation routes.\n• Restrict equipment use and open burning.")
-    elif ctx["risk_index"] >= 40:
+    elif score >= 40:
         lines.append("Recommended:\n• Increase patrols and lookout coverage during the afternoon peak.\n• Remind residents about defensible space.")
     else:
         lines.append("Recommended:\n• Normal staffing.\n• Monitor the forecast for wind or humidity changes.")
@@ -214,11 +240,11 @@ def _template_briefing(ctx):
     return "\n".join(lines)
 
 
-def briefing(cell, risk_payload, fires_in_cell=None):
-    key = ("brief", risk_payload["as_of"], cell["id"], cell["risk"], fires_in_cell)
+def briefing(cell, risk_payload, fires_in_cell=None, hazard="wildfire"):
+    key = ("brief", risk_payload["as_of"], cell["id"], cell["risk"], fires_in_cell, hazard)
     if key in _cache:
         return _cache[key]
-    ctx = _cell_context(cell, risk_payload, fires_in_cell)
+    ctx = _cell_context(cell, risk_payload, fires_in_cell, hazard)
     result = {"engine": "template", "text": None}
     if GEMINI_API_KEY:
         try:

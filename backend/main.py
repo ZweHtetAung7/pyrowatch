@@ -70,6 +70,7 @@ def config():
         "places": [[n, la, lo] for n, la, lo in PLACES],
         "grid": {"west": CA_BBOX[0], "south": CA_BBOX[1], "step": GRID_STEP_DEG},
         "factors": risk.FACTORS,
+        "hazards": risk.HAZARDS,
     }
 
 
@@ -95,10 +96,12 @@ def get_satellites():
 
 
 @app.get("/api/briefing/{cell_id}")
-def get_briefing(cell_id: str, as_of: str | None = None):
+def get_briefing(cell_id: str, as_of: str | None = None, hazard: str = "wildfire"):
+    if hazard not in risk.HAZARDS:
+        raise HTTPException(400, f"hazard must be one of: {', '.join(risk.HAZARDS)}")
     d = _parse_date(as_of)
     payload = risk.compute_risk(d)
-    return ai.briefing(_cell(payload, cell_id), payload, _fires_in_cell(d, cell_id))
+    return ai.briefing(_cell(payload, cell_id), payload, _fires_in_cell(d, cell_id), hazard)
 
 
 class AskBody(BaseModel):
@@ -114,10 +117,10 @@ def post_ask(body: AskBody):
 
 
 @app.get("/api/tts/{cell_id}")
-def get_tts(cell_id: str, as_of: str | None = None):
+def get_tts(cell_id: str, as_of: str | None = None, hazard: str = "wildfire"):
     if not ELEVENLABS_API_KEY:
         raise HTTPException(404, "ELEVENLABS_API_KEY not set")
-    b = get_briefing(cell_id, as_of)
+    b = get_briefing(cell_id, as_of, hazard)
     try:
         audio = ai.tts(b["text"])
     except Exception as exc:  # noqa: BLE001
@@ -169,6 +172,10 @@ def get_beacon(lat: float, lon: float, radius_km: float = Query(50, ge=5, le=300
         "nearest_fire_km": round(near[0][0], 1) if near else None,
         "latest_fire_utc": max((d["time_utc"] for _, d in near), default=None),
         "top_factor": _ascii(f"{top['label']}: {top['explain']}")[:90],
+        "hazards": {
+            name: {"score": value["score"], "category": value["category"]}
+            for name, value in cell.get("hazards", {}).items()
+        },
         "as_of": payload["as_of"],
         "generated_at": payload["generated_at"],
         "demo": demo,

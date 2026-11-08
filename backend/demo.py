@@ -63,12 +63,39 @@ def daily_weather(lat, lon, day: date):
     }
 
 
+def hourly_weather(lat, lon, day: date):
+    """Deterministic synthetic hourly CAPE (J/kg) and snowfall (cm)."""
+    season = math.cos((day.timetuple().tm_yday - 200) / 365 * 2 * math.pi)
+    wind_event = _event_strength(day)
+    sierra = _gauss2(lat, lon, 37.5, -119.3, 1.15)
+    winter = max(0.0, -season)
+    rng = _rng("hourly-wx", round(lat, 2), round(lon, 2), day.isoformat())
+    hourly = []
+    for hour in range(24):
+        daylight = max(0.0, math.sin(math.pi * (hour - 6) / 14))
+        cape = max(0.0, 100 + 1800 * max(0.0, season) * daylight
+                   + 550 * wind_event * daylight + rng.gauss(0, 90))
+        snow_chance = min(0.8, winter * sierra * 0.45)
+        snowfall = rng.expovariate(1 / max(0.05, 0.35 * sierra)) if rng.random() < snow_chance else 0.0
+        hourly.append({
+            "time": f"{day.isoformat()}T{hour:02d}:00",
+            "cape": round(cape, 1),
+            "snowfall": round(snowfall, 2),
+        })
+    return hourly
+
+
 def weather_series(points, start: date, end: date):
     out = []
     for lat, lon in points:
         days, d = {}, start
         while d <= end:
-            days[d.isoformat()] = daily_weather(lat, lon, d)
+            hourly = hourly_weather(lat, lon, d)
+            days[d.isoformat()] = {
+                **daily_weather(lat, lon, d),
+                "cape_max_jkg": max((h["cape"] for h in hourly), default=None),
+                "snowfall_sum_cm": sum(h["snowfall"] for h in hourly),
+            }
             d += timedelta(days=1)
         out.append(days)
     return out

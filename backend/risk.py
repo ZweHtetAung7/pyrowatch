@@ -33,6 +33,11 @@ FACTORS = [
     {"key": "heat", "label": "Heat", "weight": 0.10},
     {"key": "terrain", "label": "Terrain", "weight": 0.08},
 ]
+HAZARDS = {
+    "wildfire": {"label": "Wildfire", "unit": "risk index", "description": "Relative wildfire risk; not a probability."},
+    "thunderstorm": {"label": "Thunderstorm", "unit": "convective potential index", "description": "CAPE indicates atmospheric instability; it is not a forecast of lightning or storm occurrence."},
+    "blizzard": {"label": "Blizzard", "unit": "winter weather index", "description": "Combines forecast snowfall, wind and cold; it is not an official warning."},
+}
 CATEGORIES = [(75, "Extreme"), (60, "Very high"), (40, "High"), (20, "Moderate"), (0, "Low")]
 HISTORY_YEARS = 5
 # A fire counts as "significant" (likely a wildfire) when it burned this hot, seen in at least this many
@@ -117,6 +122,8 @@ def raw_features(series, as_of: date, relief_m, fire_days_5y, ndvi=None):
         "fire_days_5y": fire_days_5y,
         "ndvi": ndvi,
         "ffwi": max((v for v in ffwi_days if v is not None), default=None),
+        "cape_max_jkg": _agg(window, "cape_max_jkg", max),
+        "snowfall_48h_cm": _agg(window, "snowfall_sum_cm", sum),
         "month_sin": math.sin(2 * math.pi * as_of.month / 12),
         "month_cos": math.cos(2 * math.pi * as_of.month / 12),
     }
@@ -189,6 +196,60 @@ def score_cell(f, lat):
     return total, round(gate, 3), factors, round(veg, 3)
 
 
+def score_severe_weather(f):
+    """Return explainable 0–100 thunderstorm and blizzard indices from forecast metrics."""
+    cape = f.get("cape_max_jkg")
+    storm_factors = []
+    if cape is not None:
+        storm_factors.append({
+            "key": "cape", "label": "Peak CAPE", "weight": 1.0,
+            "value": clamp01(cape / 2500), "points": round(100 * clamp01(cape / 2500), 1),
+            "explain": f"peak hourly CAPE {cape:.0f} J/kg over 48 h",
+        })
+    storm_score = round(sum(item["points"] for item in storm_factors), 1) if storm_factors else None
+
+    definitions = [
+        ("snowfall", "Snowfall", 0.60, f.get("snowfall_48h_cm"),
+         lambda value: clamp01(value / 25),
+         lambda value: f"{value:.1f} cm forecast over 48 h"),
+        ("wind", "Wind", 0.25, f.get("gust_kmh"),
+         lambda value: clamp01((value - 25) / 55),
+         lambda value: f"peak gusts {value:.0f} km/h"),
+        ("cold", "Cold", 0.15, f.get("tmax_c"),
+         lambda value: clamp01((5 - value) / 20),
+         lambda value: f"high temperature {value:.1f} °C"),
+    ]
+    snowfall = f.get("snowfall_48h_cm")
+    available = [(key, label, weight, value, score, explain)
+                 for key, label, weight, value, score, explain in definitions
+                 if value is not None and (key != "snowfall" or snowfall is not None)]
+    weight_sum = sum(item[2] for item in available)
+    blizzard_factors = []
+    if weight_sum:
+        snowfall_gate = clamp01(snowfall / 15)
+        for key, label, weight, value, score_fn, explain_fn in available:
+            value_score = score_fn(value)
+            explain = f"{explain_fn(value)} · snowfall gate ×{snowfall_gate:.2f}"
+            blizzard_factors.append({
+                "key": key, "label": label, "weight": round(weight / weight_sum, 3),
+                "value": round(value_score, 3),
+                "points": round(100 * weight / weight_sum * value_score * snowfall_gate, 1),
+                "explain": explain,
+            })
+    blizzard_score = round(sum(item["points"] for item in blizzard_factors), 1) if blizzard_factors else None
+
+    return {
+        "thunderstorm": {
+            "score": storm_score, "category": category(storm_score) if storm_score is not None else None,
+            "factors": storm_factors,
+        },
+        "blizzard": {
+            "score": blizzard_score, "category": category(blizzard_score) if blizzard_score is not None else None,
+            "factors": blizzard_factors,
+        },
+    }
+
+
 # ---------------------------------------------------------------- optional trained model
 
 _model_cache = {"mtime": None, "bundle": None}
@@ -257,10 +318,13 @@ def _compute_risk(d: date, today: date):
     for c in cells:
         f = feats[c["id"]]
         total, gate, factors, veg_gate = score_cell(f, c["lat"])
+        severe = score_severe_weather(f)
+        severe["wildfire"] = {"score": total, "category": category(round(total)), "factors": factors}
         row = {
             "id": c["id"], "name": c["name"], "lat": c["lat"], "lon": c["lon"], "shape": c["shape"],
             "risk": total, "category": category(round(total)), "fuel_gate": gate, "veg_gate": veg_gate,
             "vegetation": vegetation_text(f.get("ndvi")), "factors": factors,
+            "hazards": severe,
             "raw": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in f.items() if not k.startswith("month_")},
         }
         if bundle:
@@ -272,9 +336,28 @@ def _compute_risk(d: date, today: date):
     ranked = sorted(out, key=lambda r: -r["risk"])
     for i, r in enumerate(ranked):
         r["rank"] = i + 1
+    for hazard in HAZARDS:
+        hazard_ranked = sorted(
+            (r for r in out if r["hazards"][hazard]["score"] is not None),
+            key=lambda r: -r["hazards"][hazard]["score"],
+        )
+        for i, row in enumerate(hazard_ranked):
+            row["hazards"][hazard]["rank"] = i + 1
     counts = {name: 0 for _, name in CATEGORIES}
     for r in out:
         counts[r["category"]] += 1
+    counts_by_hazard = {}
+    top_by_hazard = {}
+    for hazard in HAZARDS:
+        scored = [r for r in out if r["hazards"][hazard]["score"] is not None]
+        counts_by_hazard[hazard] = {name: 0 for _, name in CATEGORIES}
+        for row in scored:
+            counts_by_hazard[hazard][row["hazards"][hazard]["category"]] += 1
+        top_by_hazard[hazard] = [
+            {"id": r["id"], "name": r["name"], "score": r["hazards"][hazard]["score"],
+             "category": r["hazards"][hazard]["category"]}
+            for r in sorted(scored, key=lambda row: -row["hazards"][hazard]["score"])[:8]
+        ]
     result = {
         "as_of": d.isoformat(),
         "window": f"{d.isoformat()} → {(d + timedelta(days=1)).isoformat()} (48 h)",
@@ -282,6 +365,9 @@ def _compute_risk(d: date, today: date):
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "model": {"type": "weighted index", "factors": [{k: fx[k] for k in ("key", "label", "weight")} for fx in FACTORS],
                   "ml": (bundle or {}).get("metrics") if bundle else None},
+        "hazards": HAZARDS,
+        "counts_by_hazard": counts_by_hazard,
+        "top_by_hazard": top_by_hazard,
         "sources": statuses,
         "counts": counts,
         "top": [{"id": r["id"], "name": r["name"], "risk": r["risk"]} for r in ranked[:8]],
@@ -306,7 +392,8 @@ def _record_prediction(result):
         "as_of": result["as_of"],
         "recorded_at": result["generated_at"],
         "sources": result["sources"],
-        "cells": {c["id"]: {"risk": c["risk"], "category": c["category"], "ml_prob": c.get("ml_prob")} for c in result["cells"]},
+        "cells": {c["id"]: {"risk": c["risk"], "category": c["category"], "ml_prob": c.get("ml_prob"),
+                            "hazards": c.get("hazards", {})} for c in result["cells"]},
     }
     path.write_text(json.dumps(snap))
 
