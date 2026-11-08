@@ -2,257 +2,211 @@
 
 **Satellites watch California so wildfires don't catch us by surprise.**
 
-PyroWatch is a live wildfire-ignition risk map for the next 48 hours. It combines NASA satellite fire
-detections (VIIRS and MODIS via FIRMS), weather forecasts, fuel dryness, terrain and 5 years of fire
-history. It explains each area's score factor by factor, writes a plain-language briefing with Gemini,
-answers questions through a Gemini agent that queries the live data itself, and shows the satellites
-doing the watching as they orbit overhead. On the ground, an ESP32 **PyroWatch Beacon** turns one
-location's risk into lights, a fire-danger dial and an alarm, and reports local sensor readings back.
+PyroWatch scores wildfire risk for the next 48 hours across every 50 km area of California, shows
+exactly why each area scores what it does, and checks itself against what NASA satellites actually
+saw burn. Built at UB Hacking 2026.
 
-Then it **proves itself**: replay a past fire (e.g. the January 2025 LA windstorm), see what the map
-said *before* ignition, click **Reveal what happened next** to watch the real detections appear, and
-get a validation score (hit rate, lift over random, ROC AUC).
+![Replay of January 6, 2025: using only data available that day, PyroWatch ranks the area where the Palisades Fire started the next morning #1 of 186, and shows why: no rain in 30+ days, 74 km/h offshore gusts, 13% humidity](screenshots/06-replay-day-before.png)
 
----
+> **The day before the January 2025 Los Angeles fires, PyroWatch ranked the areas where the
+> Palisades and Eaton fires started #1 and #2 of 186 in California**, using only data available
+> that day.
 
-## Quick start (5 minutes)
+## Results
 
-```bash
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env                                     # then paste your keys
-uvicorn backend.main:app --reload
+We replayed four historical fire events on real data. For each one we take the risk map as it stood
+the day before, then check where **significant new fires** (fire intensity peaking above 50 MW)
+started over the next three days. Reproduce with `python scripts/check_presets.py`.
+
+| Event (prediction date) | Significant new fires in our top 20% | Lift vs random | ROC AUC | Fosberg index alone |
+|---|---|---|---|---|
+| LA windstorm: Palisades and Eaton (Jan 6, 2025) | 2 of 3 | 3.3× | 0.84 | 3 of 3 |
+| Camp and Woolsey fires (Nov 7, 2018) | 6 of 9 | 3.3× | 0.80 | 4 of 9 |
+| Wine Country fires, Tubbs (Oct 8, 2017) | 9 of 16 | 2.8× | 0.85 | 4 of 16 |
+| Lightning siege, SCU and LNU complexes (Aug 16, 2020) | 4 of 18 | 1.1× | 0.74 | 3 of 18 |
+| **All four events** | **21 of 46** | **2.3×** | | 14 of 46 (1.5×) |
+
+- **PyroWatch caught 50% more of the major fires** than the standard Fosberg Fire Weather Index, a
+  weather-only index used in National Weather Service fire-weather products. Weather alone points
+  at deserts and dry valleys with nothing to burn; fuel dryness, vegetation and fire history fix that.
+- **A trained model beats the hand-built score** on a season it never saw. Trained on the
+  July–October 2021 and 2022 fire seasons and tested on 2023: ROC AUC **0.70**, against 0.61 for our
+  weighted score and 0.45 for the Fosberg index alone.
+- **Where it falls short:** lightning-started fires score close to random (1.1×), because the model
+  has no lightning input. Random guessing scores 1.0× lift and 0.5 AUC.
+
+## What it does
+
+| | |
+|---|---|
+| ![Reveal and validation](screenshots/07-what-happened-next.png) **Replay, reveal, validate.** Replay a past fire using only data from the day before, reveal what satellites saw burn next, and get the hit rate, lift over random and AUC. | ![Live risk map](screenshots/01-live-risk-map.png) **Live 48-hour risk map.** Every 50 km area of California, with NASA satellite fire detections from the last 48 hours. |
+| ![Fire-watch satellites](screenshots/05-fire-watch-satellites.png) **The satellites doing the watching.** NOAA-20, NOAA-21, Suomi NPP, Aqua and Terra, propagated live from their orbital elements, with ground tracks and sensor footprints. | ![Phone layout](screenshots/09-phone.png) **Works anywhere.** Phone layout, colorblind-safe colors, full keyboard and screen-reader support. |
+
+- **Every score shows its work.** Click an area to see how many points each factor adds, the
+  standard Fosberg index next to it, and the trained model's 7-day fire probability.
+- **Ask PyroWatch.** Type a town to jump to it, or ask a question. A Gemini agent answers by calling
+  eight of PyroWatch's own tools (area lookup, comparisons, fires nearby, satellite passes,
+  validation, ground stations), and lists every call above its answer.
+- **Plain-language briefings** written by Gemini for each area, optionally read aloud (ElevenLabs).
+- **PyroWatch Beacon.** An ESP32 that watches one town: a servo dial shows its risk, a buzzer sounds
+  when risk spikes or satellites spot fire nearby, and its temperature and humidity sensor reports
+  back to the map as a ground station.
+- **Guided tour.** First-time visitors get a one-minute tour; `?tour=1` loops it for an expo screen.
+
+## How it works
+
+```mermaid
+flowchart LR
+  subgraph data["Free public data"]
+    FIRMS["NASA FIRMS<br/>satellite fire detections"]
+    OM["Open-Meteo<br/>forecast, ERA5 history, elevation"]
+    MODIS["NASA MODIS<br/>vegetation (NDVI)"]
+    CT["CelesTrak<br/>orbital elements"]
+  end
+  subgraph backend["FastAPI backend"]
+    RISK["Weighted risk index"]
+    ML["Trained ML model"]
+    VAL["Validation against<br/>real fires"]
+    AGENT["Gemini agent<br/>(8 tools)"]
+    ORB["SGP4 orbits"]
+  end
+  FIRMS --> RISK
+  FIRMS --> VAL
+  OM --> RISK
+  MODIS --> RISK
+  RISK --> ML
+  RISK --> VAL
+  CT --> ORB
+  backend --> WEB["Web app<br/>(Leaflet map)"]
+  backend --> BEACON["ESP32 beacon"]
+  BEACON -- "sensor readings" --> backend
+  backend --> DB[("Tiger Data<br/>time series")]
 ```
 
-Open http://localhost:8000.
+### The risk score
 
-It runs **with no keys at all**. Any source that isn't configured or doesn't respond falls back to
-synthetic data, and the UI shows a yellow **DEMO DATA** badge so you never present fake data by
-accident. Set `PYROWATCH_DATA_MODE=demo` to force fully offline mode (for rehearsing on bad wifi), or
-`live` to make failures loud instead of falling back.
-
-### Keys
-
-| Key | Needed for | Get it |
-|---|---|---|
-| `FIRMS_MAP_KEY` | live fire detections | https://firms.modaps.eosdis.nasa.gov/api/map_key/ (free, emailed in minutes) |
-| `GEMINI_API_KEY` | AI briefings + "Ask PyroWatch" | https://aistudio.google.com/apikey. Set `GEMINI_MODEL` to the current Flash model listed there |
-| `ELEVENLABS_API_KEY` | optional: "Listen to briefing" voice | elevenlabs.io |
-| `DATABASE_URL` | optional: Tiger Data time series (risk history chart, recorded predictions) | console.cloud.timescale.com: free service, copy its connection string |
-
-Open-Meteo (weather, terrain) and CelesTrak (orbits) need no key. `STATION_TOKEN` (optional) is a
-shared secret that beacons must send to post readings.
-
-### Before the demo (do this early!)
-
-1. **Build the fire history** (powers the "fire history" factor and the ML labels):
-   `python scripts/build_fire_history.py --start 2015 --end 2025`
-   If the download is slow, grab the MODIS → United States yearly CSVs from https://firms.modaps.eosdis.nasa.gov/country/
-   in a browser and run `--csv file1.csv file2.csv …`.
-2. **Fetch vegetation once** (`python scripts/fetch_vegetation.py`, 5–15 min) and commit
-   `data/vegetation.json`.
-3. **Click through every Replay preset** with live data and pick the one that tells the best story
-   (`python scripts/check_presets.py` does all of them at once).
-4. **Record a real prediction.** On one machine only, set `PYROWATCH_RECORD_LEDGER=1` in `.env`; the
-   first live map each day is then saved to `data/ledger/YYYY-MM-DD.json`,
-   and with `DATABASE_URL` set, *every* refresh is stored in Tiger Data. Commit the ledger file to
-   git right away: the commit timestamp proves the prediction came before the fires. Two days later,
-   "Validate" uses that recorded prediction instead of a hindcast.
-5. Record a backup video of the demo.
-
----
-
-## How the model works
-
-Each 0.5° grid cell (~50 km, 186 cells over California) gets a **risk index from 0 to 100**:
+Each 0.5° area (~50 km; 186 cover California) gets a **risk index from 0 to 100**. It is a relative
+index, not a probability; the trained model supplies the probability.
 
 ```
-points_i = 100 × weight_i × factor_i × fuel_gate × veg_gate        risk = Σ points_i
-fuel_gate = 0.35 + 0.65 × fuel_dryness           (wet vegetation damps the weather factors)
-veg_gate  = 0.2 + 0.8 × vegetation               (spring NDVI: bare desert can't rank high)
+points_i  = 100 × weight_i × factor_i × fuel_gate × veg_gate        risk = Σ points_i
+fuel_gate = 0.35 + 0.65 × fuel_dryness       wet vegetation damps the weather factors
+veg_gate  = 0.2 + 0.8 × vegetation           bare desert can't rank high
 ```
 
 | Factor | Weight | Measured as (0 → 1) | Source |
 |---|---|---|---|
-| Fuel dryness | 30% | days since ≥2 mm rain (0→30), 30-day rain (60→0 mm), 7-day VPD (0→4 kPa) | Open-Meteo |
+| Fuel dryness | 30% | days since ≥2 mm rain (0→30), 30-day rain (60→0 mm), 7-day vapour-pressure deficit (0→4 kPa) | Open-Meteo |
 | Wind | 20% | max gusts in the 48 h window, 15 → 70 km/h | Open-Meteo forecast |
 | Low humidity | 18% | min relative humidity, 50% → 5% | Open-Meteo forecast |
-| Fire history | 14% | satellite fire-days in the cell over the previous 5 years (log scale) | NASA FIRMS archive |
+| Fire history | 14% | satellite fire-days in the area over the previous 5 years (log scale) | NASA FIRMS archive |
 | Heat | 10% | max temperature, 15 → 40 °C | Open-Meteo forecast |
-| Terrain | 8% | elevation variability across the cell (0 → 450 m std. dev.) | Open-Meteo elevation |
-| Vegetation | multiplier | spring NDVI 0.10 → 0.40 (×0.2 → ×1.0): is there anything to burn? | NASA MODIS MOD13Q1, Apr 2016 (before every replay preset) |
+| Terrain | 8% | elevation variability across the area (0 → 450 m std. dev.) | Open-Meteo elevation |
+| Vegetation | multiplier | spring NDVI 0.10 → 0.40 (×0.2 → ×1.0) | NASA MODIS MOD13Q1, April 2016 (before every replay) |
 
-The UI breakdown is exactly these points, so judges can see why an area scored 72. It is a
-**relative risk index, not a probability.** The trained model (below) adds an actual probability.
+The panel breakdown is exactly these points. Replays only use data that existed on the replay date:
+weather up to that day, fire history from the five years before, and vegetation from 2016.
 
-**Fuel dryness is a proxy** built from precipitation and vapour-pressure deficit. **Vegetation**
-comes from MODIS NDVI (via the ORNL DAAC web service, no key), fetched once with
-`python scripts/fetch_vegetation.py` into `data/vegetation.json`, which is committed so teammates
-get it with `git pull`. Without that file the multiplier is simply off (badge "Vegetation: off").
+### Validation
 
-### Validation (`/api/validate`)
+For a start date D, take the prediction as of D (a prediction recorded in advance if one exists,
+otherwise a hindcast from data up to D), then look at NASA FIRMS detections from D to D+2. A
+**significant new fire** is an area whose detections peak above 50 MW of fire intensity in at least
+two detections, with no such fire there in the five days before. Detections labelled as industrial,
+volcanic or offshore are dropped.
 
-For a start date D: take the prediction as of D (a recorded ledger snapshot if one exists, otherwise
-a hindcast using only data up to D), then look at FIRMS detections from D to D+2. A **significant
-new fire** is an area whose detections in that window peak above 50 MW of fire intensity (in at least
-2 detections), with no such fire there in the 5 days before. It reports what share of those were in
-our top 20% (hit rate), lift over random (random = 1.0×) and ROC AUC, plus the same numbers counting
-every hotspot. We first defined "significant" by count (at least 5 detections); the first real-data
-run showed winter pile and farm burns making dozens of 5–30 MW detections, so we switched to
-intensity. That change was made after seeing the data, which is why both views are always shown.
+We first counted any area with at least five detections; the first real-data run showed winter pile
+and farm burns producing dozens of 5–30 MW detections, so we switched to intensity. That change came
+after seeing the data, which is why the panel and the script always show the all-hotspot numbers
+next to the significant-fire ones.
 
-Be upfront about these caveats. They're printed in the UI too:
-- FIRMS also detects agricultural, prescribed and industrial burns.
-- 50 km cells test regional risk, not exact ignition points.
-- Hindcasts use observed weather in place of the forecast; recorded predictions don't.
+Caveats, also shown in the app: satellites see farm, prescribed and industrial burns too; 50 km
+areas test regional risk, not exact ignition points; hindcasts use observed weather in place of a
+forecast.
 
-**Baseline: the Fosberg Fire Weather Index.** A standard US Forest Service index from temperature,
-humidity and wind alone, widely used in National Weather Service fire-weather products. It is shown in each
-area's panel, used as an ML feature, and validation ranks areas by it too, so you can see whether
-PyroWatch's extra signals (fuel dryness, vegetation, terrain, fire history) beat the weather-only standard.
+### The ML model
 
-To validate every replay preset at once (with the rank of the area where each named fire started),
-run `python scripts/check_presets.py`. It prints a paste-ready table and saves it to `data/preset_results.md`.
-
-### ML upgrade (stretch goal)
+`scripts/train_model.py` builds one sample per area per week of each fire season, with the same
+measurements the score uses plus the Fosberg index, labelled "a new fire was detected in this area
+within 7 days". It trains logistic regression and gradient boosting on earlier years, tests on the
+last year, and compares both with the weighted score and the Fosberg index on that same year. The
+strongest signals: past fires in the area, vegetation, season, then low humidity.
 
 ```bash
-python scripts/build_fire_history.py --start 2015 --end 2024
-python scripts/train_model.py --years 2020 2021 2022 2023 --step 7
+python scripts/train_model.py --years 2021 2022 2023 --season 7-10 --step 7
 ```
 
-This trains logistic regression and gradient boosting on the *same* features. The label is "a new
-fire detection in the cell within 7 days". It uses a time split (train on earlier years, test on the
-last one) and compares against the weighted index on the same test set. The best model is saved to
-`data/model.joblib`, and every area then shows "ML: xx% chance of a new fire within 7 days".
-Show the printed comparison table to the AI/ML judges. `--demo` runs the whole pipeline offline on
-synthetic data, as a pipeline test only.
+### The Gemini agent
 
----
+"Ask PyroWatch" sends the question to Gemini with eight function declarations that run the same code
+as the map: `find_area`, `top_areas`, `compare_areas`, `fires_near`, `satellite_passes`
+(server-side SGP4), `statewide_summary`, `validation` and `ground_stations`. Gemini may chain several
+calls; the results go back to it, and it answers only from them. Without a Gemini key, a keyword
+router calls the same tools. `python scripts/check_gemini.py` tests the key, model and a tool call.
 
-## Ask PyroWatch (Gemini agent)
+## Run it
 
-Type a town in the search box to jump to it, or type a question ("Why is Malibu higher than Santa
-Barbara?", "When will a satellite next see Paradise?", "Where should crews stage tonight?").
-Gemini answers with **function calling** over eight tools that run the same code as the map:
-`find_area`, `top_areas`, `compare_areas`, `fires_near`, `satellite_passes` (server-side SGP4),
-`statewide_summary`, `validation` and `ground_stations`. It may chain several calls, and every call
-is shown above the answer, so judges can see that the agent does real work and doesn't make up
-numbers. Without a Gemini key, a keyword router calls the same tools.
+```bash
+git clone https://github.com/ZweHtetAung7/pyrowatch.git && cd pyrowatch
+python3 -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+python -m pip install -r requirements.txt
+cp .env.example .env                                     # add keys (all optional)
+python -m uvicorn backend.main:app --reload
+```
 
-## Accessibility
+Open http://localhost:8000. Python 3.10 or newer.
 
-- The default color scale gets steadily lighter from low to high risk, so it reads correctly with
-  any type of color blindness and in grayscale. "Colors: Classic" switches to green → red.
-- Keyboard: `/` focuses search, arrow keys move between neighboring areas, `+`/`-` zoom, `Esc` closes.
-- Screen readers: each selection is announced ("Pasadena area. Risk 60 out of 100, Very high…").
-  Toggles expose `aria-pressed`, focus moves to the panel heading, and contrast is AA.
-- `prefers-reduced-motion` turns off fly-to animations, pulsing and the reveal animation.
+It runs **with no keys at all**: any source that isn't configured or doesn't respond falls back to
+synthetic data, and the app shows a yellow **DEMO DATA** badge so synthetic data is never mistaken
+for real. `PYROWATCH_DATA_MODE=demo` forces offline mode; `live` makes failures loud instead.
 
-## Hardware: PyroWatch Beacon
+| Key in `.env` | Turns on | Get it |
+|---|---|---|
+| `FIRMS_MAP_KEY` | Live satellite fire detections | https://firms.modaps.eosdis.nasa.gov/api/map_key/ (free) |
+| `GEMINI_API_KEY` | Briefings and the agent | https://aistudio.google.com/apikey |
+| `ELEVENLABS_API_KEY` | Spoken briefings (optional) | elevenlabs.io |
+| `DATABASE_URL` | Tiger Data time series: risk history chart, recorded predictions (optional) | Tiger Cloud |
+| `STATION_TOKEN` | Shared secret beacons send with readings (optional) | any password |
 
-An ESP32 that watches one California location. It drives green/yellow/red LEDs, a servo
-"fire danger" dial and an OLED. It sounds an alarm when risk climbs to Very high or Extreme, or when
-satellites detect new fires within 50 km. With a DHT22 it becomes a ground station whose readings
-appear on the map, in the area panel, in the agent's tools and in Tiger Data.
-Wiring, parts and flashing steps: [firmware/README.md](firmware/README.md).
+Open-Meteo and CelesTrak need no key. Fire history (`data/fire_history.json`), vegetation
+(`data/vegetation.json`) and the trained model (`data/model.joblib`) are committed; the scripts in
+`scripts/` rebuild them.
+
+**Deploy** on any Ubuntu server (we used Vultr): clone to `/opt/pyrowatch`, add `.env`, then
+`sudo bash deploy/setup_vultr.sh your-domain` installs a systemd service behind Caddy with HTTPS.
+
+**Hardware:** parts, wiring and flashing steps for the beacon are in [firmware/README.md](firmware/README.md).
 
 ## Project layout
 
 ```
 backend/
-  main.py      FastAPI routes + serves the frontend
-  sources.py   NASA FIRMS, Open-Meteo (forecast / ERA5 archive / elevation), CelesTrak; caching + fallback
-  risk.py      features → factor scores → weighted index; validation; prediction ledger
-  ai.py        Gemini briefings (template fallback), ElevenLabs voice
-  agent.py     "Ask PyroWatch": Gemini function-calling agent over 8 tools (offline router fallback)
-  orbits.py    server-side SGP4 satellite passes (used by the agent)
-  ground.py    ground stations: readings posted by PyroWatch Beacons
-  store.py     Tiger Data / PostgreSQL time series: predictions, detections, ground readings (optional)
-  geo.py       California outline, analysis grid, place names
-  demo.py      synthetic stand-ins for every source (offline mode)
-frontend/      index.html, app.js (Leaflet + satellite.js SGP4 orbits), style.css, vendor/
-scripts/       build_fire_history.py, train_model.py
-deploy/        Vultr setup script, systemd unit, Caddyfile (HTTPS for your domain)
-firmware/      PyroWatch Beacon: ESP32 sketch, config template, wiring guide
-data/          ledger/ (commit it!), cache/ (ignored), fire_history.json, model.joblib
+  main.py      FastAPI routes; serves the frontend
+  sources.py   NASA FIRMS, Open-Meteo (forecast, ERA5, elevation), MODIS vegetation, CelesTrak; caching, fallbacks
+  risk.py      features → factor scores → weighted index; Fosberg index; validation; prediction ledger
+  agent.py     "Ask PyroWatch": Gemini function-calling agent over 8 tools
+  ai.py        Gemini briefings, ElevenLabs voice
+  orbits.py    server-side SGP4 satellite passes
+  ground.py    ground-station readings from beacons
+  store.py     Tiger Data / PostgreSQL time series (optional)
+  geo.py, demo.py   California grid and place names; synthetic data for offline mode
+frontend/      index.html, app.js (Leaflet, satellite.js), style.css
+scripts/       check_presets, train_model, build_fire_history, fetch_vegetation, check_gemini, capture_screenshots
+firmware/      PyroWatch Beacon: ESP32 sketch and wiring guide
+deploy/        server setup script, systemd unit, Caddyfile
+data/          fire history, vegetation, trained model, recorded predictions, preset results
 ```
 
-API: `/api/risk?as_of=`, `/api/fires?as_of=&days=`, `/api/validate?as_of=`, `/api/briefing/{cell}`,
-`POST /api/ask` (agent), `/api/tts/{cell}`, `/api/history/{cell}`, `/api/satellites`, `/api/config`,
-`/api/beacon?lat=&lon=` (compact status for microcontrollers), `POST /api/stations/{id}`, `/api/stations`.
-Interactive docs are at `/docs`.
+API docs are served at `/docs` when the app is running.
 
-## Deploy on Vultr (public URL for judges)
+## Team
 
-1. Create a Vultr Cloud Compute instance (Ubuntu 24.04; the smallest plan is fine) using the MLH credits.
-2. Register the domain through GoDaddy Registry and point an **A record** at the instance's IP.
-3. On the server:
-   ```bash
-   git clone https://github.com/ZweHtetAung7/pyrowatch.git /opt/pyrowatch && cd /opt/pyrowatch
-   cp .env.example .env && nano .env            # paste keys
-   sudo bash deploy/setup_vultr.sh your-domain.example
-   ```
-   This installs the app as a systemd service behind Caddy, which serves HTTPS automatically.
+Built at UB Hacking 2026 by **Min** (data and hardware), **Zwe Aung** (model and validation),
+**Oak** (map and UI) and **Su** (AI, deploy and pitch), from the University at Buffalo and SUNY Oswego.
 
-## Team split
+## Credits
 
-| Person | Owns | Tracks it carries |
-|---|---|---|
-| 1 · Data + hardware | `sources.py`, `store.py`, `scripts/build_fire_history.py`, `firmware/` | Best Hardware · Tiger Data |
-| 2 · Model | `risk.py`, `scripts/train_model.py` | Best AI/ML |
-| 3 · Map/UI | `frontend/` | Best UI/UX · Spirit of the Hackathon (orbit layer) |
-| 4 · AI, deploy, pitch | `ai.py`, `agent.py`, `deploy/`, Devpost, demo | Gemini · ElevenLabs · Vultr · GoDaddy Registry |
-
-First hour: 1 gets the FIRMS key, starts the history build, then wires and flashes the beacon. 2 checks
-the replay presets on real data. 3 polishes the UI. 4 gets the Gemini and ElevenLabs keys working and
-tries the agent, then deploys to Vultr.
-
-## 2-minute demo script
-
-1. **Hook (10 s):** "Fire crews don't need to know where fires *are*. Satellites already tell us
-   that. They need to know where the next one will start."
-2. **Replay (40 s):** Replay → *LA windstorm, Jan 6 2025*. "This is what PyroWatch saw the day
-   before." Click the red Pasadena/Malibu area and read the breakdown: offshore gusts, single-digit
-   humidity, months without rain. Show the Gemini briefing. Click **Reveal what happened next**:
-   the Palisades and Eaton fire detections appear inside the red zones.
-3. **Proof (15 s):** The validation panel shows hit rate, lift over random and AUC. Say the caveats
-   out loud; judges respect it.
-4. **Live (20 s):** Switch to Live. "This is tonight." Show the satellites orbiting, then type
-   "Why is Malibu higher than Santa Barbara, and when does a satellite next pass over it?" and point at the
-   agent's tool calls.
-5. **Hardware (10 s):** The beacon on the table watches a California town. Its dial points at the
-   current risk and it beeps when risk escalates or new fires appear nearby. Its sensor reading is
-   on the map as a ground station.
-6. **Close (5 s):** "Satellites in orbit, sensors on the ground, and a model that shows its work."
-
-## Prize tracks (UB Hacking)
-
-**Core: the project is built for these**
-
-| Track | Our angle | Remaining work |
-|---|---|---|
-| Best General Hack | Real impact, working product, validated against real fires | Polish the demo |
-| Spirit of the Hackathon (deep space) | The satellites are part of the product: live SGP4 orbits of NOAA-20/21, Suomi NPP, Aqua, Terra; each fire shows which satellite saw it from how high; next-pass countdowns on the map and from the agent | Lead the pitch with it |
-| Best AI/ML ("real engineering") | Transparent model + trained classifier, time-split evaluation vs. the baseline, validation with hit rate / lift / AUC, plus a function-calling agent | Run `train_model.py` on real data and put the comparison table in the pitch |
-| Best Hardware Hack | PyroWatch Beacon: ESP32 with LEDs, servo dial, buzzer alarm, OLED, DHT22 ground station | Wire it, flash it, make a dial face |
-| Best UI/UX ("clear, accessible") | Colorblind-safe scale, keyboard navigation, screen-reader announcements, reduced motion, mobile layout | Polish |
-| MLH · Best Use of Gemini API | Gemini agent with 8 tools + per-area briefings | Get a key and test real questions |
-
-**Cheap add-ons (under 1 hour each)**
-
-| Track | How |
-|---|---|
-| MLH · ElevenLabs | Already wired: add `ELEVENLABS_API_KEY` and the "Listen to briefing" button appears |
-| MLH · Tiger Data | Already wired: create a free Tiger Cloud service and set `DATABASE_URL`. Predictions, detections and beacon readings become hypertables; drives the risk-history chart and recorded-prediction validation |
-| MLH · Vultr | `deploy/setup_vultr.sh`: judges get a live URL, and the beacon works away from the laptop |
-| MLH · GoDaddy Registry domain | Claim through MLH's link and point it at the Vultr server |
-
-**Not targeting:** Best Freshman Hack (the team are seniors), Solana (weak fit), Most Over-Engineered
-(opposite of our pitch) and Failure to Launch. **Radial Ventures:** check when the prompt drops.
-Ask the organizers whether one project can win several main tracks. MLH prizes are judged separately.
-
-## Credits & data
-
-NASA FIRMS (VIIRS/MODIS active fires) · Open-Meteo (forecast, ERA5 reanalysis, elevation) ·
-CelesTrak (orbital elements) · Leaflet · satellite.js · CARTO/OpenStreetMap basemap.
+Data: NASA FIRMS (VIIRS and MODIS active fires), NASA MODIS MOD13Q1 via the ORNL DAAC, Open-Meteo
+(forecast, ERA5 reanalysis, elevation), CelesTrak (orbital elements). Map tiles © Esri. Libraries:
+Leaflet, satellite.js, sgp4, FastAPI, scikit-learn. Gemini powers the briefings and the agent.
+Development was assisted by Claude Code (Anthropic). Team planning notes: [docs/HACKATHON.md](docs/HACKATHON.md).
