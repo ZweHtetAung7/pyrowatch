@@ -184,10 +184,13 @@ Open-Meteo and CelesTrak need no key. Fire history (`data/fire_history.json`), v
 (`data/vegetation.json`) and the trained model (`data/model.joblib`) are committed; the scripts in
 `scripts/` rebuild them.
 
-**Deploy** on any Ubuntu server (we used Vultr): clone to `/opt/pyrowatch`, add `.env`, then
+`python scripts/check_elevenlabs.py` tests the voice key; spoken briefings are saved, so replaying one costs no
+credits.
+
+**Deploy (optional)** on any Ubuntu server: clone to `/opt/pyrowatch`, add `.env`, then
 `sudo bash deploy/setup_vultr.sh your-domain` installs a systemd service behind Caddy with HTTPS,
 pre-loads the replays and refreshes the live forecast every 30 minutes. `sudo bash deploy/update.sh` pulls and
-restarts. `python scripts/check_elevenlabs.py` tests the voice key from the server.
+restarts.
 
 **Hardware:** parts, wiring and flashing steps for the beacon are in [firmware/README.md](firmware/README.md).
 
@@ -222,5 +225,6 @@ Built at UB Hacking 2026 by **Min** (data and hardware), **Zwe Aung** (model and
 
 Data: NASA FIRMS (VIIRS and MODIS active fires), NASA MODIS MOD13Q1 via the ORNL DAAC, Open-Meteo
 (forecast, ERA5 reanalysis, elevation), CelesTrak (orbital elements). Map tiles © Esri. Libraries:
-Leaflet, satellite.js, sgp4, FastAPI, scikit-learn. Gemini powers the briefings and the agent.
+Leaflet, satellite.js, sgp4, FastAPI, scikit-learn. Gemini powers the briefings and the agent; ElevenLabs
+voices the spoken briefings.
 Development was assisted by Claude Code (Anthropic). Team planning notes: [docs/HACKATHON.md](docs/HACKATHON.md).
