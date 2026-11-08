@@ -109,8 +109,9 @@ def main():
             page.wait_for_timeout(800)
             calls = page.evaluate("() => document.querySelectorAll('#g-answer .trace li').length")
             shot(page, "04-ask-pyrowatch",
-                 f"Ask PyroWatch: a Gemini agent answers by calling PyroWatch's own tools ({calls} calls here), "
-                 "listed above the answer.")
+                 f"Ask PyroWatch: a Gemini agent answers by calling PyroWatch's own tools "
+                 f"({calls} call{'' if calls == 1 else 's'} here), listed above the answer.")
+            page.fill("#omni-q", "")
         step("agent", agent)
 
         def orbits():
