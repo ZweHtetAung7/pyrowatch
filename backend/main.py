@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import agent, ai, ground, risk, sources, store
-from .config import (DATA_MODE, ELEVENLABS_API_KEY, FIRMS_MAP_KEY, FRONTEND_DIR, GEMINI_API_KEY, GEMINI_MODEL,
+from .config import (DATA_MODE, ELEVENLABS_API_KEY, FIRMS_MAP_KEY, FRONTEND_DIR, GEMINI_API_KEY,
                      GRID_STEP_DEG, STATION_TOKEN)
 from .geo import CA_BBOX, PLACES, cell_for_point, haversine_km
 
@@ -61,7 +61,7 @@ def config():
         "grid_step_deg": GRID_STEP_DEG,
         "has_firms_key": bool(FIRMS_MAP_KEY),
         "has_gemini": bool(GEMINI_API_KEY),
-        "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None,
+        "gemini_model": ai.current_model() if GEMINI_API_KEY else None,
         "has_tts": bool(ELEVENLABS_API_KEY),
         "agent": "gemini" if GEMINI_API_KEY else "offline router",
         "has_ml_model": risk.load_model() is not None,

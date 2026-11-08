@@ -85,6 +85,8 @@ select option { background: var(--panel-solid); }
 .btn-ghost:hover { background: rgba(255, 255, 255, 0.08); }
 
 /* ---------- satellite ticker ---------- */
+/* keep Leaflet's zoom buttons above the satellite strip */
+.leaflet-bottom.leaflet-right { margin-bottom: 74px; }
 #ticker { right: 14px; bottom: 14px; padding: 8px 10px; display: flex; gap: 6px; align-items: center; max-width: calc(100vw - 420px); overflow-x: auto; }
 #ticker .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; padding: 0 6px; white-space: nowrap; }
 .sat-chip { border: 1px solid var(--line); border-radius: 10px; padding: 4px 9px; background: rgba(127, 209, 255, 0.05); text-align: left; white-space: nowrap; }
@@ -218,6 +220,7 @@ kbd { font: 10.5px var(--mono); border: 1px solid var(--line); border-bottom-wid
   #stats { bottom: calc(10px + env(safe-area-inset-bottom, 0px) + 9.5rem); }
   .stat { min-width: 105px; padding: 8px 12px; }
   #ticker { display: none; }
+  .leaflet-bottom.leaflet-right { margin-bottom: 0; }
   #panel { left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 72vh; border-radius: 18px 18px 0 0; z-index: 1500; padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
   #toast { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 }

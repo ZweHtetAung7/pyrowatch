@@ -12,7 +12,7 @@ import re
 from datetime import date
 
 from . import ai, ground, orbits, risk
-from .config import GEMINI_API_KEY, GEMINI_MODEL
+from .config import GEMINI_API_KEY
 from .geo import PLACES, cell_for_point, haversine_km
 
 log = logging.getLogger("pyrowatch.agent")
@@ -38,11 +38,11 @@ DECLARATIONS = [
     {"name": "satellite_passes", "description": "When the fire-detecting satellites (NOAA-20, NOAA-21, Suomi NPP, Aqua, Terra) next pass over a place, computed from orbital elements with SGP4.",
      "parameters": {"type": "object", "properties": {"query": _S, "hours": {**_N, "description": "look-ahead window, default 12"}}, "required": ["query"]}},
     {"name": "statewide_summary", "description": "Statewide overview: forecast window, number of areas per risk category, top areas, fire detection count, data sources, model description.",
-     "parameters": {"type": "object", "properties": {}}},
+    },
     {"name": "validation", "description": "How well PyroWatch's earlier prediction matched where new fires actually started (hit rate in top 20%, lift over random, ROC AUC).",
      "parameters": {"type": "object", "properties": {"as_of": {**_S, "description": "prediction date YYYY-MM-DD; default two days ago"}}}},
     {"name": "ground_stations", "description": "Latest temperature/humidity readings from PyroWatch Beacon ground stations.",
-     "parameters": {"type": "object", "properties": {}}},
+    },
 ]
 
 
@@ -215,7 +215,7 @@ def run(question: str, as_of: date | None = None, cell_id: str | None = None):
             parts = resp["candidates"][0].get("content", {}).get("parts", [])
             calls = [p["functionCall"] for p in parts if "functionCall" in p]
             if not calls:
-                return {"engine": GEMINI_MODEL, "text": ai.response_text(resp) or "(no answer)", "steps": steps, "areas": _uniq(tools.touched)}
+                return {"engine": ai.current_model(), "text": ai.response_text(resp) or "(no answer)", "steps": steps, "areas": _uniq(tools.touched)}
             contents.append({"role": "model", "parts": parts})  # echo verbatim (keeps thought signatures)
             replies = []
             for call in calls:
@@ -230,10 +230,10 @@ def run(question: str, as_of: date | None = None, cell_id: str | None = None):
                     fr["id"] = call["id"]
                 replies.append({"functionResponse": fr})
             contents.append({"role": "user", "parts": replies})
-        return {"engine": GEMINI_MODEL, "text": "I needed too many lookups for that one; try a narrower question.", "steps": steps, "areas": _uniq(tools.touched)}
+        return {"engine": ai.current_model(), "text": "I needed too many lookups for that one; try a narrower question.", "steps": steps, "areas": _uniq(tools.touched)}
     except Exception as exc:  # noqa: BLE001
         log.warning("agent failed: %s", exc)
-        return {"engine": "error", "text": f"Gemini request failed ({type(exc).__name__}). Try again in a moment.", "steps": steps, "areas": _uniq(tools.touched)}
+        return {"engine": "error", "text": f"Gemini request failed: {exc}", "steps": steps, "areas": _uniq(tools.touched)}
 
 
 def _uniq(ids):

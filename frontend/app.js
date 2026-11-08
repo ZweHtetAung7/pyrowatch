@@ -204,13 +204,13 @@ function renderStats(message) {
   }
   const r = state.risk, f = state.fires;
   if (!r) { renderStats('Waiting for data…'); return; }
-  const hot = (r.counts.Extreme || 0) + (r.counts['Very high'] || 0);
+  const hot = (r.counts.Extreme || 0) + (r.counts['Very high'] || 0) + (r.counts.High || 0);
   const top = r.top && r.top[0];
   const firesLabel = state.asOf ? 'Fires, next 72 h' : 'Fire detections, 48 h';
   const firesVal = state.asOf && !state.firesRevealed ? '<small>hidden</small>' : `${f?.count ?? '–'}`;
   $('#stats').innerHTML = `
     <div class="stat"><div class="k">${firesLabel}</div><div class="v">${firesVal}</div></div>
-    <div class="stat"><div class="k">Areas very high+</div><div class="v">${hot}<small> / ${r.cells.length}</small></div></div>
+    <div class="stat"><div class="k">Areas high risk or above</div><div class="v">${hot}<small> / ${r.cells.length}</small></div></div>
     <div class="stat"><div class="k">Highest risk</div><div class="v name" title="${esc(top ? top.name : '')}">${top ? `${esc(top.name)} · ${top.risk.toFixed(0)}` : '–'}</div></div>
     ${state.asOf && !state.firesRevealed ? '<button class="btn-reveal" id="reveal">Reveal what happened next ▸</button>' : ''}`;
   $('#reveal')?.addEventListener('click', reveal);
@@ -330,7 +330,7 @@ async function loadBriefing(id) {
     const el = $('#briefing');
     el.classList.remove('loading');
     el.textContent = b.text;
-    $('#engine').textContent = b.engine === 'template' ? 'template (add GEMINI_API_KEY)' : b.engine;
+    $('#engine').textContent = b.engine !== 'template' ? b.engine : b.error ? 'template · Gemini failed (hover)' : 'template (add GEMINI_API_KEY)';
     if (b.error) $('#engine').title = b.error;
   } catch (e) {
     if (state.selected === id) { $('#briefing').textContent = `Briefing unavailable: ${e.message}`; $('#briefing').classList.remove('loading'); }

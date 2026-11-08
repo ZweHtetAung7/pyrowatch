@@ -1,6 +1,7 @@
 """Gemini briefings and Q&A, plus optional ElevenLabs voice. Both degrade gracefully without keys."""
 import json
 import logging
+import re
 
 import httpx
 
@@ -49,25 +50,75 @@ def _cell_context(cell, risk_payload, fires_in_cell=None):
     }
 
 
+GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
+_model = {"name": GEMINI_MODEL, "resolved": False}
+
+
+class GeminiError(RuntimeError):
+    """A Gemini API error with Google's own message (shown in the UI, so problems are fixable)."""
+
+    def __init__(self, status, message):
+        super().__init__(f"HTTP {status}: {message}")
+        self.status = status
+
+
+def _raise_for(r):
+    if r.status_code < 400:
+        return
+    try:
+        msg = r.json().get("error", {}).get("message", "") or r.text
+    except ValueError:
+        msg = r.text
+    raise GeminiError(r.status_code, " ".join(msg.split())[:300])
+
+
+def available_models():
+    """Model names this key can call with generateContent, best Flash candidates first."""
+    r = httpx.get(f"{GEMINI_API}/models", headers={"x-goog-api-key": GEMINI_API_KEY},
+                  params={"pageSize": 200}, timeout=HTTP_TIMEOUT)
+    _raise_for(r)
+    names = [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
+             if "generateContent" in m.get("supportedGenerationMethods", [])]
+    skip = ("image", "tts", "audio", "live", "embedding", "vision", "learnlm", "gemma", "robotics")
+    flash = [n for n in names if "flash" in n and not any(s in n for s in skip)]
+
+    def key(n):
+        version = [int(x) for x in re.findall(r"\d+", n.split("-flash")[0])] or [0]
+        return (any(t in n for t in ("preview", "exp")), "lite" in n, [-v for v in version], n)
+
+    return sorted(flash, key=key) + [n for n in names if n not in flash]
+
+
+def current_model():
+    return _model["name"]
+
+
 def gemini_request(system, contents, tools=None, temperature=0.4):
-    """One generateContent call (REST). Returns the parsed JSON response."""
-    body = {
-        "system_instruction": {"parts": [{"text": system}]},
-        "contents": contents,
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": 1024},
-    }
-    if tools:
-        body["tools"] = tools
-    if "2.5" in GEMINI_MODEL:  # skip "thinking" for a snappier demo on 2.5 models
-        body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
-    r = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-        headers={"x-goog-api-key": GEMINI_API_KEY},
-        json=body,
-        timeout=HTTP_TIMEOUT,
-    )
-    r.raise_for_status()
-    return r.json()
+    """One generateContent call (REST). Returns the parsed JSON response.
+    If the configured model doesn't exist (retired names 404), switch once to the best
+    available Flash model and remember it."""
+    for attempt in range(2):
+        model = _model["name"]
+        body = {
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": contents,
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": 1024},
+        }
+        if tools:
+            body["tools"] = tools
+        if "2.5" in model:  # skip "thinking" for a snappier demo on 2.5 models
+            body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
+        r = httpx.post(f"{GEMINI_API}/models/{model}:generateContent",
+                       headers={"x-goog-api-key": GEMINI_API_KEY}, json=body, timeout=HTTP_TIMEOUT)
+        if r.status_code == 404 and attempt == 0 and not _model["resolved"]:
+            _model["resolved"] = True
+            choices = available_models()
+            if choices and choices[0] != model:
+                log.warning("Gemini model %s not found; switching to %s (set GEMINI_MODEL to keep it)", model, choices[0])
+                _model["name"] = choices[0]
+                continue
+        _raise_for(r)
+        return r.json()
 
 
 def response_text(resp):
@@ -109,10 +160,10 @@ def briefing(cell, risk_payload, fires_in_cell=None):
     result = {"engine": "template", "text": None}
     if GEMINI_API_KEY:
         try:
-            result = {"engine": GEMINI_MODEL, "text": _gemini(f"{BRIEFING_TASK}\n\nContext (JSON):\n{json.dumps(ctx)}")}
+            result = {"engine": current_model(), "text": _gemini(f"{BRIEFING_TASK}\n\nContext (JSON):\n{json.dumps(ctx)}")}
         except Exception as exc:  # noqa: BLE001
             log.warning("Gemini briefing failed: %s", exc)
-            result["error"] = f"Gemini unavailable ({type(exc).__name__}); showing template briefing"
+            result["error"] = f"Gemini failed, showing the template briefing. {exc}"[:400]
     if not result["text"]:
         result["text"] = _template_briefing(ctx)
     _cache[key] = result
