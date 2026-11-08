@@ -25,7 +25,7 @@
 
 // ---- Which parts are connected (1 = yes, 0 = no) --------------------------------------------
 #define USE_DHT    1                // DHT22 or DHT11 temperature/humidity sensor
-#define DHT_TYPE   DHT22            // or DHT11
+#define DHT_TYPE   DHT11            // Elegoo has DHT11
 #define USE_OLED   1                // SSD1306 128x64 I2C display at address 0x3C
 #define USE_SERVO  1                // micro servo (SG90) driving a "fire danger" dial
 
