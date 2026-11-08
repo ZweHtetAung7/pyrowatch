@@ -39,3 +39,5 @@ DATA_MODE = os.getenv("PYROWATCH_DATA_MODE", "auto").strip().lower()
 GRID_STEP_DEG = float(os.getenv("PYROWATCH_GRID_STEP", "0.5"))
 TIMEZONE = "America/Los_Angeles"
 HTTP_TIMEOUT = float(os.getenv("PYROWATCH_HTTP_TIMEOUT", "25"))
+# Seconds to wait for one Gemini model before trying the next one (busy models can stall instead of erroring).
+GEMINI_TIMEOUT = float(os.getenv("PYROWATCH_GEMINI_TIMEOUT", "20"))

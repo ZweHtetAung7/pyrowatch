@@ -2,10 +2,12 @@
 import json
 import logging
 import re
+import time
 
 import httpx
 
-from .config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, GEMINI_API_KEY, GEMINI_MODEL, HTTP_TIMEOUT
+from .config import (ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TIMEOUT,
+                     HTTP_TIMEOUT)
 
 log = logging.getLogger("pyrowatch.ai")
 _cache: dict = {}
@@ -58,18 +60,21 @@ class GeminiError(RuntimeError):
     """A Gemini API error with Google's own message (shown in the UI, so problems are fixable)."""
 
     def __init__(self, status, message):
-        super().__init__(f"HTTP {status}: {message}")
+        super().__init__(f"HTTP {status}: {message}" if status else message)
         self.status = status
 
 
-def _raise_for(r):
-    if r.status_code < 400:
-        return
+def _error_message(r):
     try:
         msg = r.json().get("error", {}).get("message", "") or r.text
     except ValueError:
         msg = r.text
-    raise GeminiError(r.status_code, " ".join(msg.split())[:300])
+    return " ".join(msg.split())[:300]
+
+
+def _raise_for(r):
+    if r.status_code >= 400:
+        raise GeminiError(r.status_code, _error_message(r))
 
 
 def available_models():
@@ -93,35 +98,76 @@ def current_model():
     return _model["name"]
 
 
+def _thinking_options(model):
+    """Thinking settings to try, lightest first. Briefings and tool routing don't need deep thinking,
+    and on a busy day it is most of the wait. A model that rejects one setting gets the next."""
+    if "2.5" in model:
+        return [{"thinkingBudget": 0}, None]
+    if re.match(r"gemini-([3-9]|\d\d)", model):
+        return ([{"thinkingLevel": "minimal"}] if "flash" in model else []) + [{"thinkingLevel": "low"}, None]
+    return [None]
+
+
+_thinking_step: dict = {}  # model -> index of the thinking setting that model accepts
 RETRYABLE = (404, 429, 500, 503)  # retired model, quota or overload: another model may work
+MAX_MODELS = 4  # models tried per request
+TOTAL_BUDGET_S = 45  # stop trying models after this long and let the caller fall back
 
 
-def gemini_request(system, contents, tools=None, temperature=0.4):
+def _post(model, body, timeout):
+    """One generateContent call to one model, adapting the thinking setting if the model rejects it."""
+    while True:
+        options = _thinking_options(model)
+        cfg = options[min(_thinking_step.get(model, 0), len(options) - 1)]
+        gen = {k: v for k, v in body["generationConfig"].items() if k != "thinkingConfig"}
+        if cfg:
+            gen["thinkingConfig"] = cfg
+        r = httpx.post(f"{GEMINI_API}/models/{model}:generateContent",
+                       headers={"x-goog-api-key": GEMINI_API_KEY}, json={**body, "generationConfig": gen},
+                       timeout=httpx.Timeout(timeout, connect=10))
+        msg = _error_message(r).lower() if r.status_code == 400 else ""
+        if cfg and ("think" in msg or "budget" in msg):
+            _thinking_step[model] = _thinking_step.get(model, 0) + 1
+            continue
+        return r
+
+
+def gemini_request(system, contents, tools=None, temperature=0.4, model=None, fallback=True, timeout=None):
     """One generateContent call (REST). Returns the parsed JSON response.
 
-    If the model is retired (404), rate-limited (429) or overloaded (500/503), try the next model
-    this key can use (best Flash first, up to 4 in total) and remember the first one that works.
-    Quotas are per model, so switching also helps with 429s during a busy demo."""
-    model, tried, candidates = _model["name"], [], None
+    If the model is retired (404), rate-limited (429), overloaded (500/503) or too slow to answer,
+    try the next model this key can use (best Flash first, up to MAX_MODELS) and remember the first
+    one that works. Quotas are per model, so switching also helps with 429s during a busy demo."""
+    model = model or _model["name"]
+    timeout = timeout or GEMINI_TIMEOUT
+    body = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": 2048},
+    }
+    if tools:
+        body["tools"] = tools
+    deadline = time.monotonic() + max(TOTAL_BUDGET_S, timeout)
+    tried, failures, candidates = [], [], None
     while True:
-        body = {
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": contents,
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": 1024},
-        }
-        if tools:
-            body["tools"] = tools
-        if "2.5" in model:  # skip "thinking" for a snappier demo on 2.5 models
-            body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
-        r = httpx.post(f"{GEMINI_API}/models/{model}:generateContent",
-                       headers={"x-goog-api-key": GEMINI_API_KEY}, json=body, timeout=HTTP_TIMEOUT)
-        if r.status_code < 400:
-            if model != _model["name"]:
+        wait = min(timeout, max(deadline - time.monotonic(), 1))
+        try:
+            r = _post(model, body, wait)
+            error = None if r.status_code < 400 else GeminiError(r.status_code, _error_message(r))
+            retryable = r.status_code in RETRYABLE
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise GeminiError(None, f"could not reach Google ({exc}); check the internet connection") from exc
+        except httpx.TimeoutException:
+            error = GeminiError(None, f"no answer within {wait:.0f} s (busy?)")
+            retryable = True
+        if error is None:
+            if fallback and model != _model["name"]:
                 log.warning("Gemini: now using %s (set GEMINI_MODEL=%s in .env to start with it)", model, model)
                 _model["name"] = model
             return r.json()
         tried.append(model)
-        if r.status_code in RETRYABLE and len(tried) < 4:
+        failures.append(f"{model}: {str(error)[:140]}")
+        if fallback and retryable and len(tried) < MAX_MODELS and deadline - time.monotonic() > 3:
             if candidates is None:
                 try:
                     candidates = available_models()
@@ -129,10 +175,12 @@ def gemini_request(system, contents, tools=None, temperature=0.4):
                     candidates = []
             nxt = next((m for m in candidates if m not in tried), None)
             if nxt:
-                log.warning("Gemini model %s failed (HTTP %s); trying %s", model, r.status_code, nxt)
+                log.warning("Gemini model %s failed (%s); trying %s", model, error, nxt)
                 model = nxt
                 continue
-        _raise_for(r)
+        if len(failures) > 1 or error.status is None:
+            error = GeminiError(None, "; ".join(failures))
+        raise error
 
 
 def response_text(resp):
