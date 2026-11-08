@@ -266,6 +266,8 @@ function renderHeader() {
     + src.map(([k, s]) => `<span class="badge ${s.mode !== 'live' ? 'demo' : ''}" title="${esc(s.source)}${s.note ? ` — ${esc(s.note)}` : ''}"><i></i>${k}: ${s.mode === 'live' ? 'live' : s.mode === 'off' ? 'off' : 'demo'}</span>`).join('');
 }
 function renderStats(message) {
+  // The reveal button lives in the replay controls (top left), where an open area panel can't cover it.
+  $('#reveal').hidden = !(state.asOf && !state.firesRevealed && state.risk && !message);
   if (message) {
     $('#stats').innerHTML = `<div class="stat" style="border-right:0;min-width:0"><div class="k">Status</div><div class="v name" style="max-width:none;white-space:normal">${esc(message)}</div></div>`;
     return;
@@ -279,9 +281,7 @@ function renderStats(message) {
   $('#stats').innerHTML = `
     <div class="stat"><div class="k">${firesLabel}</div><div class="v">${firesVal}</div></div>
     <div class="stat"><div class="k">Areas high risk or above</div><div class="v">${hot}<small> / ${r.cells.length}</small></div></div>
-    <div class="stat"><div class="k">Highest risk</div><div class="v name" title="${esc(top ? top.name : '')}">${top ? `${esc(top.name)} · ${top.risk.toFixed(0)}` : '–'}</div></div>
-    ${state.asOf && !state.firesRevealed ? '<button class="btn-reveal" id="reveal">Reveal what happened next ▸</button>' : ''}`;
-  $('#reveal')?.addEventListener('click', reveal);
+    <div class="stat"><div class="k">Highest risk</div><div class="v name" title="${esc(top ? top.name : '')}">${top ? `${esc(top.name)} · ${top.risk.toFixed(0)}` : '–'}</div></div>`;
 }
 async function reveal() {
   state.firesRevealed = true;
@@ -645,6 +645,7 @@ function initControls() {
   $('#mode-live').onclick = () => setMode(false);
   $('#mode-replay').onclick = () => setMode(true);
   $('#validate').onclick = runValidation;
+  $('#reveal').onclick = reveal;
   document.querySelectorAll('.toggle').forEach((b) => b.addEventListener('click', () => {
     const k = b.dataset.layer;
     state.show[k] = !state.show[k];

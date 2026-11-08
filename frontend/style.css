@@ -65,7 +65,7 @@ select option { background: var(--panel-solid); }
 .stat .v { font: 600 20px/1.2 var(--mono); }
 .stat .v small { font-size: 12px; color: var(--muted); font-family: inherit; font-weight: 500; }
 .stat .v.name { font-family: inherit; font-size: 14px; line-height: 1.5; max-width: 210px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.btn-reveal { margin: 10px 14px; align-self: center; background: linear-gradient(135deg, var(--ember), #ff3d5a); border: 0;
+.btn-reveal { width: 100%; margin-top: 2px; background: linear-gradient(135deg, var(--ember), #ff3d5a); border: 0;
   border-radius: 10px; padding: 9px 14px; font-weight: 700; color: #fff; box-shadow: 0 0 24px rgba(255, 90, 50, 0.45); }
 
 /* ---------- legend ---------- */
@@ -221,9 +221,15 @@ kbd { font: 10.5px var(--mono); border: 1px solid var(--line); border-bottom-wid
 #tour-text { font-size: 14px; }
 
 /* ---------- responsive ---------- */
+/* With an area panel open, the stats bar stops at the panel's edge instead of sliding under it
+   (#stats comes before #panel in the page, hence :has). */
+#stats:has(~ #panel:not([hidden])) { max-width: calc(100vw - 390px - 428px); }
+#stats:has(~ #panel:not([hidden])) .stat { min-width: 0; }
+@media (max-width: 1260px) {
+  #stats:has(~ #panel:not([hidden])) { display: none; }
+}
 @media (max-width: 1180px) {
   #stats { left: auto; right: 14px; top: auto; bottom: 76px; }
-  #panel:not([hidden]) ~ #stats { display: none; }
 }
 @media (max-width: 760px) {
   html, body { overflow: hidden; }
